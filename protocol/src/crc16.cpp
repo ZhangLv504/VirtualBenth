@@ -1,8 +1,6 @@
-#include <cstddef>
-#include <cstdint>
+#include "protocol/crc16.h"
 
-// CRC16-Modbus：多项式 0x8005（反射实现 0xA001），初值 0xFFFF，无最终异或
-// 当前为最基础的逐位实现，后续可替换为查表法
+// 最基础的逐位实现，后续可替换为查表法
 uint16_t crc16_modbus(const uint8_t* data, std::size_t len) {
     uint16_t crc = 0xFFFF;
     for (std::size_t i = 0; i < len; ++i) {
