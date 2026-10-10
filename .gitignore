@@ -5,3 +5,4 @@ models/
 # 中间配置文件
 cmake-build-relwithdebinfo
 .idea
+build/
