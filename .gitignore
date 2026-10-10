@@ -1,0 +1,7 @@
+
+# 模型库文件夹，暂时不需要上传
+models/
+
+# 中间配置文件
+cmake-build-relwithdebinfo
+.idea
