@@ -1,6 +1,7 @@
 # protocol 静态库：双端共享的协议层，刻意不依赖 Qt / socket 
 add_library(protocol STATIC
     src/crc16.cpp
+	src/protocol_codec.cpp
 )
 
 # 把 include/ 暴露给链接方（PUBLIC），双端才能 #include "protocol/xxx.h" 
