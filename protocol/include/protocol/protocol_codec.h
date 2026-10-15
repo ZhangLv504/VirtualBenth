@@ -33,15 +33,13 @@ enum class DecodeError : std::uint8_t
     PayloadTooLarge,       // payload_len 超过协议上限 4096B
     FrameSizeMismatch,     // 输入包含声明帧长度之外的额外字节；decode 只接受精确一帧
     CrcMismatch,           // CRC 校验失败
-    UnsupportedVersion,    // 协议版本不是当前支持的 0x01
-    InvalidCommand,        // 命令不是协议定义的合法线上命令
 };
 
 struct DecodeResult
 {
-    // 失败关闭：只有完成结构、CRC 和帧级语义校验后才能显式设为 None。
+    // 失败关闭：只有完整帧结构和 CRC 都通过后才能显式设为 None。
     DecodeError error{DecodeError::IncompleteFrame};
-    // 解码失败时保持默认无效 Frame，避免调用方使用未经完整校验的数据。
+    // 结构或 CRC 解码失败时保持默认无效 Frame，避免调用方使用未经验证的数据。
     Frame frame{};
 
     [[nodiscard]] bool ok() const noexcept
@@ -56,7 +54,7 @@ public:
     // 将内存 Frame 编码为完整线上帧，不负责命令 payload 的业务语义校验。
     static EncodeResult encode(const Frame& frame);
 
-    // 只接受一帧精确字节；搜索 magic、缓存半包和消费粘包属于 StreamParser。
+    // 只接受一帧精确字节；版本/命令语义由业务层处理，流式状态由 StreamParser 处理。
     static DecodeResult decode(const std::vector<std::uint8_t>& bytes);
 };
 

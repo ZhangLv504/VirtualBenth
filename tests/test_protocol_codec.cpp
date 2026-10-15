@@ -250,7 +250,7 @@ TEST_CASE("decode CRC covers a non-empty payload", "[protocol][decode][crc]")
     REQUIRE(result.frame.command == Command::Invalid);
 }
 
-TEST_CASE("decode checks CRC before version semantics", "[protocol][decode][crc][version]")
+TEST_CASE("decode validates CRC before publishing an unsupported version", "[protocol][decode][crc][version]")
 {
     std::vector<std::uint8_t> bytes{
         0xA5, 0x5A, 0x01, 0x01, 0x00, 0x00, 0x50, 0x18
@@ -264,7 +264,7 @@ TEST_CASE("decode checks CRC before version semantics", "[protocol][decode][crc]
     REQUIRE(result.frame.command == Command::Invalid);
 }
 
-TEST_CASE("decode rejects an unsupported version with a valid CRC", "[protocol][decode][version]")
+TEST_CASE("decode preserves an unsupported version for the business layer", "[protocol][decode][version]")
 {
     std::vector<std::uint8_t> bytes{
         0xA5, 0x5A, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00
@@ -273,12 +273,14 @@ TEST_CASE("decode rejects an unsupported version with a valid CRC", "[protocol][
 
     const DecodeResult result = ProtocolCodec::decode(bytes);
 
-    REQUIRE_FALSE(result.ok());
-    REQUIRE(result.error == DecodeError::UnsupportedVersion);
-    REQUIRE(result.frame.command == Command::Invalid);
+    REQUIRE(result.ok());
+    REQUIRE(result.error == DecodeError::None);
+    REQUIRE(result.frame.version == 0x02);
+    REQUIRE(result.frame.command == Command::Hello);
+    REQUIRE(result.frame.payload.empty());
 }
 
-TEST_CASE("decode rejects an unknown command with a valid CRC", "[protocol][decode][command]")
+TEST_CASE("decode preserves an unknown command for the business layer", "[protocol][decode][command]")
 {
     std::vector<std::uint8_t> bytes{
         0xA5, 0x5A, 0x01, 0x55, 0x00, 0x00, 0x00, 0x00
@@ -287,12 +289,14 @@ TEST_CASE("decode rejects an unknown command with a valid CRC", "[protocol][deco
 
     const DecodeResult result = ProtocolCodec::decode(bytes);
 
-    REQUIRE_FALSE(result.ok());
-    REQUIRE(result.error == DecodeError::InvalidCommand);
-    REQUIRE(result.frame.command == Command::Invalid);
+    REQUIRE(result.ok());
+    REQUIRE(result.error == DecodeError::None);
+    REQUIRE(result.frame.version == kProtocolVersion);
+    REQUIRE(static_cast<std::uint8_t>(result.frame.command) == 0x55);
+    REQUIRE(result.frame.payload.empty());
 }
 
-TEST_CASE("decode rejects Command::Invalid with a valid CRC", "[protocol][decode][command]")
+TEST_CASE("decode preserves zero command for the business layer", "[protocol][decode][command]")
 {
     std::vector<std::uint8_t> bytes{
         0xA5, 0x5A, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -301,9 +305,11 @@ TEST_CASE("decode rejects Command::Invalid with a valid CRC", "[protocol][decode
 
     const DecodeResult result = ProtocolCodec::decode(bytes);
 
-    REQUIRE_FALSE(result.ok());
-    REQUIRE(result.error == DecodeError::InvalidCommand);
+    REQUIRE(result.ok());
+    REQUIRE(result.error == DecodeError::None);
+    REQUIRE(result.frame.version == kProtocolVersion);
     REQUIRE(result.frame.command == Command::Invalid);
+    REQUIRE(result.frame.payload.empty());
 }
 
 TEST_CASE("maximum payload survives encode and decode round-trip", "[protocol][decode][boundary]")

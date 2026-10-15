@@ -142,24 +142,11 @@ DecodeResult ProtocolCodec::decode(const std::vector<std::uint8_t>& bytes)
         return result;
     }
 
-    // CRC 通过后再解释版本与命令，避免把传输损坏误分类为语义错误。
-    if (bytes[2] != kProtocolVersion)
-    {
-        result.error = DecodeError::UnsupportedVersion;
-        return result;
-    }
-
-    const Command command = static_cast<Command>(bytes[3]);
-    if (!is_valid_command(command))
-    {
-        result.error = DecodeError::InvalidCommand;
-        return result;
-    }
-
-    // 只有全部校验通过后才构造并发布 Frame，失败路径始终保留默认无效值。
+    // CRC 通过后保留线上原始版本和命令值；业务层据此响应 VER_MISMATCH 或 UNKNOWN_CMD。
+    // 结构/CRC 失败路径始终保留默认无效 Frame，不向上层发布不可信数据。
     Frame frame;
     frame.version = bytes[2];
-    frame.command = command;
+    frame.command = static_cast<Command>(bytes[3]);
     // std::vector::assign(first, last) 可以使用两个迭代器表示一个范围，把该范围中的元素复制到当前 vector 中。
     // 范围是左闭右开 [first, last)
     frame.payload.assign(bytes.begin() + 6, bytes.begin() + crc_offset);

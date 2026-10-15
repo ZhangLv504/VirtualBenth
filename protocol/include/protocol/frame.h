@@ -7,7 +7,7 @@
 // 命令枚举
 enum class Command : std::uint8_t
 {
-    Invalid     = 0x00,     // 仅限内存中的默认无效状态，禁止发送
+    Invalid     = 0x00,     // 内存默认值；编码禁止发送，解码时可作为未知线上命令保留
     Hello       = 0x01,     // 版本协商
     Start       = 0x02,     // 启动采样
     Stop        = 0x03,     // 停止采样
