@@ -16,6 +16,7 @@ public:
     // 清空尚未组成完整帧的缓存；帧接收超时由连接层判定后调用本函数。
     void reset() noexcept;
 
+    // 获取缓存大小
     [[nodiscard]] std::size_t buffered_size() const noexcept;
 
 private:

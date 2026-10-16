@@ -2,6 +2,7 @@
 add_library(protocol STATIC
     src/crc16.cpp
 	src/protocol_codec.cpp
+	src/stream_parser.cpp
 )
 
 # 把 include/ 暴露给链接方（PUBLIC），双端才能 #include "protocol/xxx.h" 
