@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W1 协议层。
 - 学习会话：S4 `ProtocolCodec` 已结束，进入 S5 `StreamParser` 实现与验证。
-- 当前状态：`StreamParser` 三个成员函数已实现并加入 `protocol` 静态库；第一批缓存复位、逐字节拆包和两帧粘连测试已补齐精确断言并通过静态复审，尚未构建或运行专用测试。
-- 当前唯一目标：添加噪声前缀、CRC 错帧后接合法帧、超长长度头后接合法帧三项重同步测试；完成后先做静态审查。
+- 当前状态：`StreamParser` 三个成员函数已实现并加入 `protocol` 静态库；正常路径及噪声前缀、CRC 错误、超长长度三项重同步测试均已通过静态复审，尚未构建或运行专用测试。
+- 当前唯一目标：补最大 4096B payload 的 4103B 半包缓存边界与完整 4104B 成功消费测试，完成后先做静态审查。
 
 ## 默认构建环境
 
@@ -64,6 +64,7 @@
 - `protocol/src/stream_parser.cpp` 已实现持久缓存、magic 搜索、半包保留、长度上限、精确候选帧 decode、失败滑动 1B 和成功精确消费；2026-10-16 静态审查未再发现明显的循环空转、错误偏移或缓存消费问题。
 - `protocol/CMakeLists.txt` 已把 `src/stream_parser.cpp` 加入 `protocol` 静态库；上述实现尚未构建或运行测试，不能视为验收通过。
 - `tests/test_stream_parser.cpp` 已包含缓存/reset、HELLO 逐字节拆包和 HELLO+START 粘连三个用例；精确帧数、顺序、字段、半包返回值和最终缓存均已纳入断言，2026-10-16 静态复审未发现明显覆盖缺口。
+- `tests/test_stream_parser.cpp` 已增加带半个 magic 的噪声前缀、CRC 错帧后接合法 START、超长长度头后接合法 HELLO 三项恢复用例；复审时修正了 START payload 误判为空的问题，当前静态检查未发现明显覆盖缺口。
 - `tests/CMakeLists.txt` 已把 `test_stream_parser.cpp` 加入 `protocol_tests`；尚未构建或运行。
 
 ## 待处理/已知问题
@@ -72,18 +73,18 @@
 - 助手执行环境的 VS2019 工具链目录中 `cl.exe`、`mspdb140.dll`、`mspdbcore.dll`、`mspdbsrv.exe` 为 14.29.30159；同一安装的 `Common7/IDE` 中 `mspdbcore.dll`、`mspdbsrv.exe` 为 14.29.30158。临时前置正确工具目录和清理目标生成 PDB 后仍复现。
 - 当前没有已知的 S4 代码静态阻断问题；最新语义边界改动尚无默认环境验证证据，不得沿用改动前的用户构建结果。
 - `StreamParser` 已有第一批专用测试，但断言尚需加强，且未在默认 VS2019 + RelWithDebInfo 环境构建；当前仍不能视为验收通过。
-- StreamParser 第一批正常路径测试尚未实际构建或运行；噪声、CRC 错误和超长长度重同步场景仍待添加。
+- StreamParser 正常路径和首批错误恢复测试尚未实际构建或运行；最大帧缓存边界仍待添加。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`。本轮开始时本地 `main` 与 `origin/main` 一致。
-- 当前未提交修改包含第一批测试断言加强、测试目标格式整理、进度文档和新增自测题；继续操作时不得覆盖。
+- 当前未提交修改包含第二批重同步测试修正、进度文档和新增自测题；继续操作时不得覆盖。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
 - `tests/test_protocol_codec.cpp`：已编写 HELLO/START 精确示例，以及 4096B、4097B、Invalid、未知命令、未知版本场景；旧版 encode 测试曾在默认环境通过，最新完整测试在 VS2022 Debug 通过，默认环境的用户构建证据早于本轮语义边界调整。
 - `tests/CMakeLists.txt`：已把 `test_protocol_codec.cpp` 和 `test_stream_parser.cpp` 加入测试目标。
-- `tests/test_stream_parser.cpp`：已加入三个正常路径用例并通过静态复审，尚未构建或运行。
+- `tests/test_stream_parser.cpp`：已加入三个正常路径及三个重同步用例并通过静态复审，尚未构建或运行。
 - `protocol/include/protocol/stream_parser.h`：已冻结最小接口、缓存成员及完整解析/重同步伪代码。
 - `protocol/src/stream_parser.cpp`：已实现三个成员函数；`a7009fe` 确保 magic 位于缓存起点后才按固定偏移读帧头，并补充关键不变量注释。
 
@@ -98,12 +99,13 @@
 7. 2026-10-16 审查用户提交的 `StreamParser` 实现，发现找到 magic 后未消费噪声会错误读取长度；按用户授权直接修正 magic 对齐、无 magic 时保留末尾 1B、显式长度类型、候选帧命名和核心注释。修改后完成静态复核，未运行构建或测试。
 8. 2026-10-16 静态审查第一批 StreamParser 测试：协议向量和 CMake 登记正确，但发现三处断言覆盖不足，当前测试尚不能证明精确帧数和单字节半包不会产生输出；未运行构建或测试。
 9. 2026-10-16 用户修正三处关键断言后完成复审；按授权直接补齐标准库头、`std::size_t` 索引、不可变测试向量、HELLO 空 payload 断言、CMake 缩进和文件末尾换行。第一批测试静态复审通过，未运行构建或测试。
+10. 2026-10-16 复审第二批重同步测试，发现 CRC 错帧后恢复出的 START 被错误断言为空 payload；按授权改为从合法 HELLO 翻转 CRC 位，并检查 START 完整 payload，同时整理测试名称和标签。静态复审通过，未运行构建或测试。
 
 ## 下一步流程
 
-1. 在 `tests/test_stream_parser.cpp` 增加噪声前缀后解析 HELLO、CRC 错帧后恢复到合法帧、超长长度头后恢复到合法帧三个用例。
-2. 每个用例断言精确返回帧数、Frame 字段和最终缓存，完成后先进行静态审查。
-3. 错误恢复测试静态审查通过后，再经用户授权使用默认 VS2019 + RelWithDebInfo 环境构建并运行验证。
+1. 构造 payload 为 4096B 的合法最大帧，先喂前 4103B，断言无输出且缓存为 4103B。
+2. 再喂最后 1B，断言恰好返回该帧、payload 首尾与长度正确且缓存归零；完成后先进行静态审查。
+3. 最大边界测试静态审查通过后，再经用户授权使用默认 VS2019 + RelWithDebInfo 环境构建并运行验证。
 
 ## 暂不开始
 

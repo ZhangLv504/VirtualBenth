@@ -64,7 +64,7 @@ TEST_CASE("stream_parser protocol example Hello and START", "[protocol][feed][He
 }
 
 // 噪声前缀后解析 HELLO
-TEST_CASE("stream_parser protocol example noise", "[protocol][feed][noise]")
+TEST_CASE("stream_parser skips a noise prefix with partial magic", "[protocol][feed][noise][resync]")
 {
     StreamParser stream_parser;
     const std::vector<std::uint8_t> noise = {0x00, 0xA5};
@@ -82,25 +82,27 @@ TEST_CASE("stream_parser protocol example noise", "[protocol][feed][noise]")
 }
 
 // CRC 错帧后恢复到 START
-TEST_CASE("stream_parser protocol example bad", "[protocol][feed][bad]")
+TEST_CASE("stream_parser resynchronizes after a CRC error", "[protocol][feed][crc][resync]")
 {
     StreamParser stream_parser;
-    const std::vector<std::uint8_t> hello = {0xA5, 0x5A, 0x01, 0x01, 0x00, 0x00, 0x50, 0x01};
+    std::vector<std::uint8_t> invalid_hello = {0xA5, 0x5A, 0x01, 0x01, 0x00, 0x00, 0x50, 0x18};
+    invalid_hello.back() ^= 0x01;
     const std::vector<std::uint8_t> start = {0xA5, 0x5A, 0x01, 0x02, 0x05, 0x00, 0x10, 0x27, 0x00, 0x00, 0x07, 0x59, 0x0C};
+    const std::vector<std::uint8_t> expected_payload = {0x10, 0x27, 0x00, 0x00, 0x07};
     std::vector<std::uint8_t> chunk;
-    chunk.insert(chunk.end(), hello.begin(), hello.end());
+    chunk.insert(chunk.end(), invalid_hello.begin(), invalid_hello.end());
     chunk.insert(chunk.end(), start.begin(), start.end());
     const std::vector<Frame> frames = stream_parser.feed(chunk);
 
     REQUIRE(frames.size() == 1);
     REQUIRE(frames[0].command == Command::Start);
     REQUIRE(frames[0].version == kProtocolVersion);
-    REQUIRE(frames[0].payload.empty());
+    REQUIRE(frames[0].payload == expected_payload);
     REQUIRE(stream_parser.buffered_size() == 0);
 }
 
 // 超长长度头后恢复到 HELLO
-TEST_CASE("stream_parser protocol example invalid header", "[protocol][feed][invalid]")
+TEST_CASE("stream_parser resynchronizes after an oversized payload length", "[protocol][feed][length][resync]")
 {
     StreamParser stream_parser;
     const std::vector<std::uint8_t> invalid = {0xA5, 0x5A, 0x01, 0x02, 0x01, 0x10};
