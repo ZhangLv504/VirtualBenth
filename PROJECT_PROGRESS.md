@@ -73,8 +73,8 @@
 
 ## 当前工作区实现
 
-- encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现已由用户提交为 `5178d96`。当前本地 `main` 比 `origin/main` 的 `d3e0cb7` 领先 1 个提交。
-- 当前未提交修改包含 `StreamParser` 第二轮静态审查修正、进度文档和新增自测题；继续操作时不得覆盖。
+- encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新已提交为 `a7009fe`。本轮开始时本地 `main` 与 `origin/main` 一致。
+- 当前未提交修改仅包含本轮新增的进度与自测记录；继续操作时不得覆盖。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。

@@ -10,6 +10,7 @@ add_executable(protocol_tests
     test_crc16.cpp
     test_frame.cpp
     test_protocol_codec.cpp
+        test_stream_parser.cpp
 )
 
 target_link_libraries(protocol_tests PRIVATE
