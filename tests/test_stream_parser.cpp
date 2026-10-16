@@ -62,3 +62,57 @@ TEST_CASE("stream_parser protocol example Hello and START", "[protocol][feed][He
     REQUIRE(frames[1].payload == start_payload);
     REQUIRE(stream_parser.buffered_size() == 0);
 }
+
+// 噪声前缀后解析 HELLO
+TEST_CASE("stream_parser protocol example noise", "[protocol][feed][noise]")
+{
+    StreamParser stream_parser;
+    const std::vector<std::uint8_t> noise = {0x00, 0xA5};
+    const std::vector<std::uint8_t> hello = {0xA5, 0x5A, 0x01, 0x01, 0x00, 0x00, 0x50, 0x18};
+    std::vector<std::uint8_t> chunk;
+    chunk.insert(chunk.end(), noise.begin(), noise.end());
+    chunk.insert(chunk.end(), hello.begin(), hello.end());
+    const std::vector<Frame> frames = stream_parser.feed(chunk);
+
+    REQUIRE(frames.size() == 1);
+    REQUIRE(frames[0].command == Command::Hello);
+    REQUIRE(frames[0].version == kProtocolVersion);
+    REQUIRE(frames[0].payload.empty());
+    REQUIRE(stream_parser.buffered_size() == 0);
+}
+
+// CRC 错帧后恢复到 START
+TEST_CASE("stream_parser protocol example bad", "[protocol][feed][bad]")
+{
+    StreamParser stream_parser;
+    const std::vector<std::uint8_t> hello = {0xA5, 0x5A, 0x01, 0x01, 0x00, 0x00, 0x50, 0x01};
+    const std::vector<std::uint8_t> start = {0xA5, 0x5A, 0x01, 0x02, 0x05, 0x00, 0x10, 0x27, 0x00, 0x00, 0x07, 0x59, 0x0C};
+    std::vector<std::uint8_t> chunk;
+    chunk.insert(chunk.end(), hello.begin(), hello.end());
+    chunk.insert(chunk.end(), start.begin(), start.end());
+    const std::vector<Frame> frames = stream_parser.feed(chunk);
+
+    REQUIRE(frames.size() == 1);
+    REQUIRE(frames[0].command == Command::Start);
+    REQUIRE(frames[0].version == kProtocolVersion);
+    REQUIRE(frames[0].payload.empty());
+    REQUIRE(stream_parser.buffered_size() == 0);
+}
+
+// 超长长度头后恢复到 HELLO
+TEST_CASE("stream_parser protocol example invalid header", "[protocol][feed][invalid]")
+{
+    StreamParser stream_parser;
+    const std::vector<std::uint8_t> invalid = {0xA5, 0x5A, 0x01, 0x02, 0x01, 0x10};
+    const std::vector<std::uint8_t> hello = {0xA5, 0x5A, 0x01, 0x01, 0x00, 0x00, 0x50, 0x18};
+    std::vector<std::uint8_t> chunk;
+    chunk.insert(chunk.end(), invalid.begin(), invalid.end());
+    chunk.insert(chunk.end(), hello.begin(), hello.end());
+    const std::vector<Frame> frames = stream_parser.feed(chunk);
+
+    REQUIRE(frames.size() == 1);
+    REQUIRE(frames[0].command == Command::Hello);
+    REQUIRE(frames[0].version == kProtocolVersion);
+    REQUIRE(frames[0].payload.empty());
+    REQUIRE(stream_parser.buffered_size() == 0);
+}
