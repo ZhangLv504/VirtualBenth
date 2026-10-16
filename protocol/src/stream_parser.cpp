@@ -2,91 +2,89 @@
 
 #include "protocol/protocol_codec.h"
 
-// 追加任意大小的数据块，并返回本次调用中解析出的 0～N 个完整帧。
+#include <utility>
+
+namespace
+{
+    constexpr std::uint8_t kMagicFirst = 0xA5;
+    constexpr std::uint8_t kMagicSecond = 0x5A;
+    constexpr std::size_t kHeaderSize = 6;
+    constexpr std::size_t kFrameOverhead = 8;
+    constexpr std::uint16_t kMaxPayloadSize = 4096;
+}
+
 std::vector<Frame> StreamParser::feed(const std::vector<std::uint8_t>& chunk)
 {
+    buffer_.insert(buffer_.end(), chunk.begin(), chunk.end());
     std::vector<Frame> frames;
 
-    // 将 chunk 添加到 buffer_ 中
-    buffer_.insert(buffer_.end(), chunk.begin(), chunk.end());
-
-    while (!buffer_.empty())
+    while (true)
     {
-        // 在 buffer_ 中搜索完整 magic [0xA5, 0x5A]
-        bool found_magic = false;
+        // 帧字段偏移都以 magic 为起点，因此解析帧头前必须先把 magic 移到 buffer_[0]。
         std::size_t magic_idx = 0;
         for (; magic_idx + 1 < buffer_.size(); magic_idx++)
         {
-            if (buffer_[magic_idx] == 0xA5 && buffer_[magic_idx + 1] == 0x5A)
+            if (buffer_[magic_idx] == kMagicFirst && buffer_[magic_idx + 1] == kMagicSecond)
             {
-                found_magic = true;
                 break;
             }
         }
 
-        if (!found_magic)
+        if (magic_idx + 1 >= buffer_.size())
         {
-            // 如果最后一个字节恰好是 0xA5
-            if (buffer_.back() == 0xA5)
+            // 最后 1B 可能与下一批数据组成跨 chunk 的 magic，其他噪声可以丢弃。
+            if (buffer_.size() > 1)
             {
-                // 删除除了最后一个字节之外的所有数据
                 buffer_.erase(buffer_.begin(), buffer_.end() - 1);
             }
-            else
-            {
-                // 全是脏数据，直接清空
-                buffer_.clear();
-            }
-            return frames; // 缓存不够完整帧头，返回等待下一次 feed
+            return frames;
         }
 
-        if (buffer_.size() < 6)
+        if (magic_idx > 0)
+        {
+            buffer_.erase(buffer_.begin(), buffer_.begin() + magic_idx);
+        }
+
+        if (buffer_.size() < kHeaderSize)
         {
             return frames;
         }
 
-        // 版本和命令是否有效这边不处理，交给业务层处理
-
-
-        auto payload_len = (static_cast<std::uint16_t>(buffer_[4])) | (static_cast<std::uint16_t>(buffer_[5]) << 8);
-        if (payload_len > 4096)
+        const std::uint16_t payload_len = static_cast<std::uint16_t>(buffer_[4])
+            | static_cast<std::uint16_t>(static_cast<std::uint16_t>(buffer_[5]) << 8);
+        if (payload_len > kMaxPayloadSize)
         {
-            buffer_.erase(buffer_.begin(), buffer_.begin() + 1);
+            // 当前 magic 可能是伪起点；只滑动 1B，避免跳过后方真正的合法帧。
+            buffer_.erase(buffer_.begin());
             continue;
         }
 
-        auto frame_size = payload_len +8;
+        const std::size_t frame_size = kFrameOverhead + static_cast<std::size_t>(payload_len);
         if (buffer_.size() < frame_size)
         {
             return frames;
         }
 
-        std::vector<std::uint8_t> payload;
-        payload.insert(payload.end(), buffer_.begin(), buffer_.begin() + frame_size);
-        DecodeResult result = ProtocolCodec::decode(payload);
-        if (result.ok())
+        // CRC 和完整帧结构由 ProtocolCodec 统一判断，StreamParser 只负责定界与重同步。
+        const std::vector<std::uint8_t> candidate(buffer_.begin(), buffer_.begin() + frame_size);
+        DecodeResult result = ProtocolCodec::decode(candidate);
+        if (!result.ok())
         {
-            frames.push_back(result.frame);
-        }
-        else
-        {
-            buffer_.erase(buffer_.begin(), buffer_.begin() + 1);
+            buffer_.erase(buffer_.begin());
             continue;
         }
 
+        frames.push_back(std::move(result.frame));
+        // 成功后只消费精确帧长，保留其后可能粘连的下一帧并继续解析。
         buffer_.erase(buffer_.begin(), buffer_.begin() + frame_size);
     }
-
-    return frames;
 }
 
-// 清空尚未组成完整帧的缓存；帧接收超时由连接层判定后调用本函数。
 void StreamParser::reset() noexcept
 {
     buffer_.clear();
 }
 
-// 获取缓存大小
 std::size_t StreamParser::buffered_size() const noexcept
 {
     return buffer_.size();

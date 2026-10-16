@@ -1,14 +1,14 @@
 # VirtualBenth 项目进度
 
-> 最近核对：2026-10-15（Asia/Shanghai）
+> 最近核对：2026-10-16（Asia/Shanghai）
 > 用途：给当前与新会话提供动态交接。开始工作时仍须核对 Git、实际文件和最新测试输出。
 
 ## 当前阶段
 
 - 主线：项目一 VirtualBenth，W1 协议层。
-- 学习会话：S4 `ProtocolCodec` 已结束，进入 S5 `StreamParser` 设计。
-- 当前状态：`StreamParser` 最小接口和核心流程伪代码已通过第二轮静态审查；头文件已整理为可编译的接口声明，尚未实现或加入 CMake。
-- 当前唯一目标：用户依据已冻结伪代码，在 `stream_parser.cpp` 中实现 `feed()`、`reset()` 和 `buffered_size()`；本轮只完成核心循环，不提前扩展连接层超时或业务语义。
+- 学习会话：S4 `ProtocolCodec` 已结束，进入 S5 `StreamParser` 实现与验证。
+- 当前状态：`StreamParser` 三个成员函数已实现并加入 `protocol` 静态库；2026-10-16 第二轮静态审查修正了 magic 前缀未消费、无 magic 缓存契约和长度类型问题，尚未构建或运行专用测试。
+- 当前唯一目标：为 `StreamParser` 添加拆包、粘包、噪声、CRC 错误和超长长度测试；测试代码先经静态审查，运行构建和测试前仍需用户授权。
 
 ## 默认构建环境
 
@@ -60,26 +60,28 @@
 - `protocol_codec.cpp` 已完成精确单帧 decode：小端长度、4096B 上限、精确帧长、CRC、原始版本/命令保留、payload 和成功结果构造均已覆盖。
 - 2026-10-14 用户授权直接修正剩余问题后，已完成第二轮静态审查；未再发现明显的端序、越界、CRC 范围或失败开放问题。
 - decode 的最新语义边界已通过补充环境测试；用户报告的默认环境编译成功早于该边界调整，因此最新改动在默认环境仍待用户后续构建时复核。
-- `protocol/include/protocol/stream_parser.h` 已新增 `feed()`、`reset()`、`buffered_size()` 和内部 `buffer_`，并记录通过静态审查的核心流程伪代码；尚未实现、加入构建或测试。
+- `protocol/include/protocol/stream_parser.h` 已声明 `feed()`、`reset()`、`buffered_size()` 和内部 `buffer_`，并记录核心流程伪代码。
+- `protocol/src/stream_parser.cpp` 已实现持久缓存、magic 搜索、半包保留、长度上限、精确候选帧 decode、失败滑动 1B 和成功精确消费；2026-10-16 静态审查未再发现明显的循环空转、错误偏移或缓存消费问题。
+- `protocol/CMakeLists.txt` 已把 `src/stream_parser.cpp` 加入 `protocol` 静态库；上述实现尚未构建或运行测试，不能视为验收通过。
 
 ## 待处理/已知问题
 
 - 助手所在执行环境此前三次构建均在编译 `protocol_codec.cpp` 和 `test_protocol_codec.cpp` 时失败，错误为 MSVC `C1902`（程序数据库管理器不匹配），没有产生 C++ 源码诊断；用户自己的 VS2019 环境不复现并已编译通过，因此该问题按执行环境差异记录，不再阻断 S5。
 - 助手执行环境的 VS2019 工具链目录中 `cl.exe`、`mspdb140.dll`、`mspdbcore.dll`、`mspdbsrv.exe` 为 14.29.30159；同一安装的 `Common7/IDE` 中 `mspdbcore.dll`、`mspdbsrv.exe` 为 14.29.30158。临时前置正确工具目录和清理目标生成 PDB 后仍复现。
 - 当前没有已知的 S4 代码静态阻断问题；最新语义边界改动尚无默认环境验证证据，不得沿用改动前的用户构建结果。
-- `StreamParser` 目前只有接口和伪代码，没有 `.cpp` 实现、CMake 源文件登记或专用测试，不能视为已实现或通过验收。
-- `protocol/include/protocol/stream_parser.h` 当前 Git 状态为 `AM`：暂存区仍是最初空骨架，修订后的接口与伪代码位于未暂存工作区；提交前需由用户按意图重新暂存。
+- `StreamParser` 尚无专用测试，也未在默认 VS2019 + RelWithDebInfo 环境构建；当前结论仅为“已实现且通过静态审查”，不能视为验收通过。
 
 ## 当前工作区实现
 
-- encode 基线为 `a230d26`；decode、测试、核心注释和进度文档已由用户提交为 `e053eeb`（`ProtocolCodec::decode() 编码及其测试完成`），当前本地 `main` 与 `origin/main` 一致。
-- 当前未提交修改把 decode 的边界调整为结构/CRC 解码，并同步修改测试、`Frame` 注释、进度文档和自测题；继续操作时不得覆盖。
+- encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现已由用户提交为 `5178d96`。当前本地 `main` 比 `origin/main` 的 `d3e0cb7` 领先 1 个提交。
+- 当前未提交修改包含 `StreamParser` 第二轮静态审查修正、进度文档和新增自测题；继续操作时不得覆盖。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
-- `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 加入 `protocol` 静态库。
+- `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
 - `tests/test_protocol_codec.cpp`：已编写 HELLO/START 精确示例，以及 4096B、4097B、Invalid、未知命令、未知版本场景；旧版 encode 测试曾在默认环境通过，最新完整测试在 VS2022 Debug 通过，默认环境的用户构建证据早于本轮语义边界调整。
 - `tests/CMakeLists.txt`：已把 `test_protocol_codec.cpp` 加入测试目标。
 - `protocol/include/protocol/stream_parser.h`：已冻结最小接口、缓存成员及完整解析/重同步伪代码。
+- `protocol/src/stream_parser.cpp`：已实现三个成员函数；当前未提交修正确保 magic 位于缓存起点后才按固定偏移读帧头，并补充关键不变量注释。
 
 ## 本轮已处理
 
@@ -89,12 +91,13 @@
 4. 未运行最新改动的 VS2019 + RelWithDebInfo 构建或测试；等待用户下次默认环境构建时复核，但不阻断已获授权的 S5 设计。
 5. 2026-10-15 完成 `StreamParser` 第一版接口与伪代码静态审查：接口可保留，伪代码因未使用持久缓存、未循环重同步且职责越界而暂未通过；本轮未运行构建或测试。
 6. 2026-10-15 第二轮审查发现 magic 仍未搜索、半包 `continue` 会空转、协议语义和 CRC 重复处理、成功帧未精确消费；按用户授权已直接修正为声明式头文件和完整伪代码。修正后静态审查通过，本轮未运行构建或测试。
+7. 2026-10-16 审查用户提交的 `StreamParser` 实现，发现找到 magic 后未消费噪声会错误读取长度；按用户授权直接修正 magic 对齐、无 magic 时保留末尾 1B、显式长度类型、候选帧命名和核心注释。修改后完成静态复核，未运行构建或测试。
 
 ## 下一步流程
 
-1. 用户新建 `protocol/src/stream_parser.cpp`，按头文件伪代码实现三个成员函数；核心循环只操作 `buffer_`，完整候选帧交给 `ProtocolCodec::decode()`。
-2. 实现后把源文件加入 `protocol/CMakeLists.txt`，先进行静态审查，不同时扩展设备模拟器或连接层。
-3. 静态审查通过后添加拆包、粘包、噪声、CRC 错和超长长度测试，再按授权环境运行验证。
+1. 添加 `tests/test_stream_parser.cpp`，覆盖空输入、逐字节拆包、两帧粘连、噪声前缀、截断 magic、CRC 错后恢复、超长长度后恢复和最大帧缓存边界。
+2. 把测试源文件加入 `tests/CMakeLists.txt`，先进行静态审查，不同时扩展设备模拟器或连接层。
+3. 静态审查通过后，再经用户授权使用默认 VS2019 + RelWithDebInfo 环境构建并运行验证。
 
 ## 暂不开始
 
