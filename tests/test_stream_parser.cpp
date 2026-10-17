@@ -218,3 +218,37 @@ TEST_CASE("stream_parser handles reproducible uneven fragmentation across frames
     REQUIRE(parsed_frames[2].payload == stop.payload);
     REQUIRE(stream_parser.buffered_size() == 0);
 }
+
+TEST_CASE("stream_parser handles every two-part split of a non-empty frame",
+          "[protocol][feed][fragmentation][split]")
+{
+    Frame start;
+    start.command = Command::Start;
+    start.payload = {0x10, 0x27, 0x00, 0x00, 0x07};
+
+    const EncodeResult result = ProtocolCodec::encode(start);
+    REQUIRE(result.ok());
+    REQUIRE(result.bytes.size() == 13);
+
+    // 遍历完整帧内部的每个切点；0 和 size 分别是不分片与空分片，不属于二段切分。
+    for (std::size_t split_pos = 1; split_pos < result.bytes.size(); ++split_pos)
+    {
+        CAPTURE(split_pos);
+        StreamParser stream_parser;
+        const std::vector<std::uint8_t> first_chunk(result.bytes.begin(),
+                                                     result.bytes.begin() + split_pos);
+        const std::vector<std::uint8_t> second_chunk(result.bytes.begin() + split_pos,
+                                                      result.bytes.end());
+
+        const std::vector<Frame> incomplete_frames = stream_parser.feed(first_chunk);
+        REQUIRE(incomplete_frames.empty());
+        REQUIRE(stream_parser.buffered_size() == split_pos);
+
+        const std::vector<Frame> frames = stream_parser.feed(second_chunk);
+        REQUIRE(frames.size() == 1);
+        REQUIRE(frames[0].version == start.version);
+        REQUIRE(frames[0].command == start.command);
+        REQUIRE(frames[0].payload == start.payload);
+        REQUIRE(stream_parser.buffered_size() == 0);
+    }
+}

@@ -33,7 +33,7 @@
 
 ## 项目边界
 
-- 默认本地构建环境是 Visual Studio 2019 工具链（MSVC 14.29）+ `RelWithDebInfo`；当前 CLion/CMake 配置使用 Ninja 生成器和 `cmake-build-relwithdebinfo` 目录。其他编译器或配置的结果只能作为补充验证，不能替代默认环境验收。
+- 默认本地构建环境是 Visual Studio 2022 工具链（当前缓存为 MSVC 19.38 / 工具集 14.38）+ `RelWithDebInfo`；当前默认构建树使用 Visual Studio 17 2022 多配置生成器和 `build` 目录，构建与测试命令必须显式指定 `--config RelWithDebInfo` / `-C RelWithDebInfo`。旧 `cmake-build-relwithdebinfo` 仅保留为 VS2019 历史环境，不再作为当前验收门槛。
 - 运行构建前先检查对应 `CMakeCache.txt`，确认编译器、生成器和配置；不得仅根据构建目录名称猜测环境。
 - 当前先完成纯 C++17 `protocol`，该层不依赖 Qt、Socket 或 GUI。
 - 严格按规划阶段推进；当前门槛未通过前，不提前创建后续整套模块。

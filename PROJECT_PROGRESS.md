@@ -7,16 +7,16 @@
 
 - 主线：项目一 VirtualBenth，W1 协议层。
 - 学习会话：S5 `StreamParser` 已结束，进入 S6 测试与代码审查。
-- 当前状态：`StreamParser` 三个成员函数及七个既有专用测试已有默认环境通过证据，S5 已完成；S6 的多帧非均匀分片测试已实现并通过静态审查，尚未构建或运行。
-- 当前唯一目标：经用户授权后，在默认 VS2019 + RelWithDebInfo + Ninja 环境重新构建并运行新增分片测试。
+- 当前状态：`StreamParser` 三个成员函数、七个既有专用测试及 S6 多帧非均匀分片测试均已在当前默认 MSVC 2022 + RelWithDebInfo 环境通过；遍历非空 payload 帧全部二段切点的新测试已实现并通过静态审查，尚未构建或运行。
+- 当前唯一目标：经用户授权后，在默认 MSVC 2022 + RelWithDebInfo 环境重新构建并运行全部二段切点测试。
 
 ## 默认构建环境
 
-- 编译器工具链：Visual Studio 2019，当前缓存为 MSVC 14.29.30133。
+- 编译器工具链：Visual Studio 2022，当前缓存为 MSVC 19.38.33145.0（工具集目录 14.38.33130）。
 - 构建配置：`RelWithDebInfo`。
-- 当前 CMake 生成器：Ninja。
-- 默认构建目录：`cmake-build-relwithdebinfo`。
-- `build` 目录使用 Visual Studio 17 2022 多配置生成器，只作为补充验证环境。
+- 当前 CMake 生成器：Visual Studio 17 2022，多配置、x64。
+- 默认构建目录：`build`；构建使用 `--config RelWithDebInfo`，CTest 使用 `-C RelWithDebInfo`。
+- `cmake-build-relwithdebinfo` 为旧 VS2019 + Ninja 历史构建树，不再作为当前默认环境验收门槛。
 
 ## 已冻结的协议要点
 
@@ -53,28 +53,33 @@
 - 2026-10-14 对照权威协议发现并修正语义边界：CRC 正确的未知版本/命令不再被 decode 当作结构错误拒绝，而是保留原始值交给业务层；VS2022 Debug 重新编译 `protocol_codec.cpp` 和 `test_protocol_codec.cpp` 成功，0 警告、0 错误。
 - 2026-10-14 修正后执行 `ctest --test-dir build -C Debug --output-on-failure`：1/1 通过；直接运行测试程序：27 个测试用例、113 个断言全部通过。
 - 2026-10-17 用户在获准使用默认 `cmake-build-relwithdebinfo` 重新构建并运行完整协议测试后报告“测试都通过了”；该结果覆盖当前 decode、StreamParser 正常路径、重同步和最大帧临界测试。此条属于用户提供的默认环境验收证据，助手未直接看到完整命令、用例数和断言数输出。
+- 2026-10-17 助手再次执行默认环境构建 `cmake --build cmake-build-relwithdebinfo --target protocol_tests --verbose`，VS2019 在包括新增测试在内的所有编译单元统一报 MSVC `C1902`，没有产生 C++ 源码诊断；该结果仍判定为助手执行环境问题。
+- 2026-10-17 核对 `build/CMakeCache.txt` 后确认补充环境为 Visual Studio 17 2022、x64、MSVC 19.38.33145.0；执行 `cmake --build build --config Debug --target protocol_tests --verbose` 成功，日志确认重新编译 `stream_parser.cpp` 和 `test_stream_parser.cpp`，0 警告、0 错误。
+- 2026-10-17 执行 `ctest --test-dir build -C Debug --output-on-failure`：1/1 通过；直接运行 `build/tests/Debug/protocol_tests.exe`：35 个测试用例、182 个断言全部通过。
+- 2026-10-17 用户将默认环境切换为 MSVC 2022 + RelWithDebInfo；核对 `build/CMakeCache.txt` 确认 Visual Studio 17 2022、x64、MSVC 19.38.33145.0，并支持 `RelWithDebInfo` 配置。
+- 2026-10-17 执行 `cmake --build build --config RelWithDebInfo --target protocol_tests --verbose` 成功；日志确认 Catch2、`crc16.cpp`、`protocol_codec.cpp`、`stream_parser.cpp` 及全部测试源以 C++17、RelWithDebInfo 参数重新编译，0 警告、0 错误。
+- 2026-10-17 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：35 个测试用例、182 个断言全部通过。
 
 ## 已实现但未验证
 
-- `tests/test_stream_parser.cpp` 已增加确定性非均匀分片测试：连续输入 HELLO、payload 内含 `A5 5A` 的 START 和 STOP，并用固定块大小跨 magic、帧头、payload、CRC 与帧边界分片；累计结果后检查三帧顺序、字段、payload 和最终空缓存。2026-10-17 静态审查未发现明显覆盖缺口，尚未构建或运行。
+- `tests/test_stream_parser.cpp` 已增加全部二段切点测试：对 13B START 帧遍历切点 1～12，每个切点使用全新 `StreamParser`，先断言无输出且缓存大小等于前段长度，再补齐并断言恰好恢复原帧、字段与 payload 完全一致且缓存归零。2026-10-17 静态审查未发现明显覆盖或边界问题，尚未构建或运行。
 
 ## 待处理/已知问题
 
-- 助手所在执行环境此前三次构建均在编译 `protocol_codec.cpp` 和 `test_protocol_codec.cpp` 时失败，错误为 MSVC `C1902`（程序数据库管理器不匹配），没有产生 C++ 源码诊断；用户自己的 VS2019 环境不复现并已编译通过，因此该问题按执行环境差异记录，不再阻断 S5。
-- 助手执行环境的 VS2019 工具链目录中 `cl.exe`、`mspdb140.dll`、`mspdbcore.dll`、`mspdbsrv.exe` 为 14.29.30159；同一安装的 `Common7/IDE` 中 `mspdbcore.dll`、`mspdbsrv.exe` 为 14.29.30158。临时前置正确工具目录和清理目标生成 PDB 后仍复现。
-- 用户本次只报告测试全部通过，未提供完整命令、CTest 数量和 Catch2 用例/断言数；进度中保留“用户提供的验收证据”限定，不写成助手直接复核。
+- 旧 VS2019 + Ninja 构建树在助手环境持续报 MSVC `C1902`，原因指向 14.29 PDB 工具组件版本不一致；该问题保留为历史环境记录，但 VS2019 已不再是当前默认门槛，不阻断后续主线。
 
 ## 当前工作区实现
 
-- encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试最新提交为 `878fced`。
-- 2026-10-17 开始核对时核心代码工作区干净，本地 `main`、`origin/main` 与 `HEAD 878fced` 一致；当前未提交修改仅为本轮维护的 `PROJECT_PROGRESS.md` 和 `Doc/自测题.md`。
+- encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
+- 2026-10-17 构建后再次核对，本地 `main`、`origin/main` 与 `HEAD bd8ed48` 一致；当前未提交修改为新的全部二段切点测试，以及本轮维护的 `AGENTS.md`、`NEW_CHAT_PROMPT.md`、`PROJECT_PROGRESS.md` 和 `Doc/自测题.md`。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
 - `tests/test_protocol_codec.cpp`：已编写 HELLO/START 精确示例，以及 4096B、4097B、Invalid、未知命令、未知版本场景；最新完整测试已有 VS2022 Debug 直接输出和 2026-10-17 用户报告的默认环境通过证据。
 - `tests/CMakeLists.txt`：已把 `test_protocol_codec.cpp` 和 `test_stream_parser.cpp` 加入测试目标。
 - `tests/test_stream_parser.cpp`：已加入三个正常路径、三个重同步用例和一个最大帧临界用例，均通过静态复审，并有 2026-10-17 用户报告的默认环境通过证据。
-- `tests/test_stream_parser.cpp` 当前另有一个未提交的 S6 确定性非均匀分片测试，已静态审查、尚未构建或运行。
+- `tests/test_stream_parser.cpp` 的 S6 确定性非均匀分片测试已提交为 `bd8ed48`，并通过当前默认 MSVC 2022 + RelWithDebInfo 环境验证。
+- `tests/test_stream_parser.cpp` 的全部二段切点测试当前未提交，已通过静态审查但尚未获得构建与运行证据。
 - `protocol/include/protocol/stream_parser.h`：已冻结最小接口、缓存成员及完整解析/重同步伪代码。
 - `protocol/src/stream_parser.cpp`：已实现三个成员函数；`a7009fe` 确保 magic 位于缓存起点后才按固定偏移读帧头，并补充关键不变量注释。
 
@@ -93,11 +98,15 @@
 11. 2026-10-17 核对 Git 与最新提交 `878fced`，确认最大 4096B payload 的 4103B/1B 临界拆包测试已经提交；对照协议第 3、8、10 节完成静态复审，未发现阻断项。默认环境缓存再次确认为 Ninja、RelWithDebInfo、MSVC 19.29.30159（工具集目录 14.29.30133）；本轮尚未获测试许可，未运行构建或测试。
 12. 2026-10-17 用户随后报告默认环境测试全部通过；按用户提供的验收证据结束 S5。核对现有测试后确认下一缺口是多帧字节流的可复现非均匀分片，进入 S6，不提前开始模拟器。
 13. 2026-10-17 按用户授权直接完成 S6 首个测试：用固定 `{1, 4, 2, 7, 1, 5, 3, 6}` 分块喂入 HELLO + START + STOP，分片跨越帧边界并拆开 START payload 内的 `A5 5A`；静态检查通过，本轮未运行构建或测试。
+14. 2026-10-17 经用户授权执行 `cmake --build cmake-build-relwithdebinfo --target protocol_tests --verbose`，默认缓存确认为 Ninja、RelWithDebInfo、MSVC 19.29.30159；编译在多个无关源文件上统一报 `C1902` 后停止，退出码 1。因构建失败，未运行 CTest 和测试程序。
+15. 2026-10-17 按用户授权切换到经缓存确认的 VS2022 Debug 补充环境；重新编译 `stream_parser.cpp` 与 `test_stream_parser.cpp` 成功，0 警告、0 错误，随后 CTest 1/1 通过，Catch2 35 个用例、182 个断言全部通过。
+16. 2026-10-17 用户将默认环境改为 MSVC 2022 + RelWithDebInfo；核对多配置缓存后重新编译全部协议与测试源，0 警告、0 错误，随后 CTest 1/1、Catch2 35 个用例和 182 个断言全部通过。S6 非均匀分片测试据此完成默认环境验收。
+17. 2026-10-17 按用户授权直接实现全部二段切点测试：遍历 13B START 帧内部的 12 个切点，以独立解析器验证半包保留和补齐恢复；静态审查通过，本轮尚未运行构建或测试。
 
 ## 下一步流程
 
 1. 先取得用户对构建和运行测试的明确许可。
-2. 使用默认 `cmake-build-relwithdebinfo` 重新构建 `protocol_tests`，再运行 CTest 与测试程序。
+2. 使用默认 `build` 构建树和 `RelWithDebInfo` 配置重新构建 `protocol_tests`，再运行 CTest 与测试程序。
 3. 根据真实输出更新验证状态；成功后再选择 S6 的下一项最小测试缺口。
 
 ## 暂不开始
