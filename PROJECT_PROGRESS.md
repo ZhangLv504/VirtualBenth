@@ -5,10 +5,10 @@
 
 ## 当前阶段
 
-- 主线：项目一 VirtualBenth，W1 协议层。
-- 学习会话：S5 `StreamParser` 已结束，进入 S6 测试与代码审查。
-- 当前状态：`StreamParser` 三个成员函数、七个既有专用测试及 S6 多帧非均匀分片测试均已在当前默认 MSVC 2022 + RelWithDebInfo 环境通过；遍历非空 payload 帧全部二段切点的新测试已实现并通过静态审查，尚未构建或运行。
-- 当前唯一目标：经用户授权后，在默认 MSVC 2022 + RelWithDebInfo 环境重新构建并运行全部二段切点测试。
+- 主线：项目一 VirtualBenth，W2 模拟器起步。
+- 学习会话：S6 测试与代码审查已结束，进入 S7 模拟器起步。
+- 当前状态：`protocol`、`ProtocolCodec`、`StreamParser` 及当前全部协议测试已在默认 MSVC 2022 + RelWithDebInfo 环境通过；S7 首版 Winsock 服务端已写入工作区，但 2026-10-17 静态审查发现阻断项，尚未达到 HELLO 闭环验收门槛。
+- 当前唯一目标：把首版 Winsock 服务端收敛为可靠的单客户端 HELLO 闭环，先修正 Socket 失败边界、协议响应 payload 和部分发送，再申请构建与联调验证。
 
 ## 默认构建环境
 
@@ -59,19 +59,26 @@
 - 2026-10-17 用户将默认环境切换为 MSVC 2022 + RelWithDebInfo；核对 `build/CMakeCache.txt` 确认 Visual Studio 17 2022、x64、MSVC 19.38.33145.0，并支持 `RelWithDebInfo` 配置。
 - 2026-10-17 执行 `cmake --build build --config RelWithDebInfo --target protocol_tests --verbose` 成功；日志确认 Catch2、`crc16.cpp`、`protocol_codec.cpp`、`stream_parser.cpp` 及全部测试源以 C++17、RelWithDebInfo 参数重新编译，0 警告、0 错误。
 - 2026-10-17 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：35 个测试用例、182 个断言全部通过。
+- 2026-10-17 新增全部二段切点测试后执行 `cmake --build build --config RelWithDebInfo --target protocol_tests --verbose` 成功；日志确认 `test_stream_parser.cpp` 由 MSVC 14.38 以 C++17、RelWithDebInfo 参数重新编译并重新链接，0 警告、0 错误。
+- 2026-10-17 随后执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：36 个测试用例、268 个断言全部通过。
 
 ## 已实现但未验证
 
-- `tests/test_stream_parser.cpp` 已增加全部二段切点测试：对 13B START 帧遍历切点 1～12，每个切点使用全新 `StreamParser`，先断言无输出且缓存大小等于前段长度，再补齐并断言恰好恢复原帧、字段与 payload 完全一致且缓存归零。2026-10-17 静态审查未发现明显覆盖或边界问题，尚未构建或运行。
+- `device_simulator` 已加入 `WinsockRuntime`、阻塞式 `TcpServer::run()`、`ws2_32` 链接及入口调用，能够表达 `socket → bind → listen → accept → recv → StreamParser → send` 的首版流程。
+- 上述模拟器改动本轮只完成静态审查，未执行 MSVC 2022 + RelWithDebInfo 构建、测试或真实客户端联调，不能记录为可运行或验收通过。
 
 ## 待处理/已知问题
 
 - 旧 VS2019 + Ninja 构建树在助手环境持续报 MSVC `C1902`，原因指向 14.29 PDB 工具组件版本不一致；该问题保留为历史环境记录，但 VS2019 已不再是当前默认门槛，不阻断后续主线。
+- **S7 阻断：** `WSAStartup`、`socket`、`bind`、`listen`、`accept` 的返回值均未检查，失败后仍打印成功日志并继续收发；必须逐步失败即停止，并报告正确错误码。
+- **S7 阻断：** 当前 ACK、STATUS、ERROR 均使用空 payload，违反协议规定的 2B ACK、1B STATUS、至少 2B ERROR；同时把除 ERROR 外的所有输入都当作成功控制命令，尚未实现 HELLO 版本、命令和 payload 校验。
+- **S7 阻断：** 三处 `send()` 都忽略返回值且没有继续发送剩余字节，不能保证完整协议帧抵达客户端。
+- 当前绑定 `INADDR_ANY` 会暴露到所有本机网卡；首个本机闭环应优先绑定 loopback。`recv()==0` 与 `SOCKET_ERROR` 也需要分开记录，资源清理应覆盖失败和异常路径。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-10-17 构建后再次核对，本地 `main`、`origin/main` 与 `HEAD bd8ed48` 一致；当前未提交修改为新的全部二段切点测试，以及本轮维护的 `AGENTS.md`、`NEW_CHAT_PROMPT.md`、`PROJECT_PROGRESS.md` 和 `Doc/自测题.md`。
+- 2026-10-17 静态审查时再次核对，本地 `main`、`origin/main` 与 `HEAD a13c2e4` 一致；工作区另有 `device_simulator/CMakeLists.txt`、`src/main.cpp`、`src/WinsockRuntime.*` 的首版服务端修改，以及文档修改和未跟踪的 `Doc/Winsock服务端使用指南.md`。`WinsockRuntime.cpp/.h` 当前为 `AM`，暂存区内容与工作树实现不同，后续提交前必须重新核对暂存内容。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -79,7 +86,7 @@
 - `tests/CMakeLists.txt`：已把 `test_protocol_codec.cpp` 和 `test_stream_parser.cpp` 加入测试目标。
 - `tests/test_stream_parser.cpp`：已加入三个正常路径、三个重同步用例和一个最大帧临界用例，均通过静态复审，并有 2026-10-17 用户报告的默认环境通过证据。
 - `tests/test_stream_parser.cpp` 的 S6 确定性非均匀分片测试已提交为 `bd8ed48`，并通过当前默认 MSVC 2022 + RelWithDebInfo 环境验证。
-- `tests/test_stream_parser.cpp` 的全部二段切点测试当前未提交，已通过静态审查但尚未获得构建与运行证据。
+- `tests/test_stream_parser.cpp` 的全部二段切点测试已提交为 `a13c2e4`，并通过静态审查及默认 MSVC 2022 + RelWithDebInfo 环境验证。
 - `protocol/include/protocol/stream_parser.h`：已冻结最小接口、缓存成员及完整解析/重同步伪代码。
 - `protocol/src/stream_parser.cpp`：已实现三个成员函数；`a7009fe` 确保 magic 位于缓存起点后才按固定偏移读帧头，并补充关键不变量注释。
 
@@ -102,15 +109,17 @@
 15. 2026-10-17 按用户授权切换到经缓存确认的 VS2022 Debug 补充环境；重新编译 `stream_parser.cpp` 与 `test_stream_parser.cpp` 成功，0 警告、0 错误，随后 CTest 1/1 通过，Catch2 35 个用例、182 个断言全部通过。
 16. 2026-10-17 用户将默认环境改为 MSVC 2022 + RelWithDebInfo；核对多配置缓存后重新编译全部协议与测试源，0 警告、0 错误，随后 CTest 1/1、Catch2 35 个用例和 182 个断言全部通过。S6 非均匀分片测试据此完成默认环境验收。
 17. 2026-10-17 按用户授权直接实现全部二段切点测试：遍历 13B START 帧内部的 12 个切点，以独立解析器验证半包保留和补齐恢复；静态审查通过，本轮尚未运行构建或测试。
+18. 2026-10-17 经用户授权在默认 MSVC 2022 + RelWithDebInfo 环境重新编译新增测试，0 警告、0 错误；CTest 1/1、Catch2 36 个用例和 268 个断言全部通过。S6 据此完成，下一阶段进入 S7 模拟器起步。
+19. 2026-10-17 对用户提交的首版 Winsock 服务端完成静态审查：确认网络主流程已经搭出，但发现未检查 Winsock/Socket API 结果、HELLO 响应 payload 不符合权威协议、未处理 `send()` 部分发送等阻断项；本轮未修改实现，未运行构建、测试或联调。
 
 ## 下一步流程
 
-1. 先取得用户对构建和运行测试的明确许可。
-2. 使用默认 `build` 构建树和 `RelWithDebInfo` 配置重新构建 `protocol_tests`，再运行 CTest 与测试程序。
-3. 根据真实输出更新验证状态；成功后再选择 S6 的下一项最小测试缺口。
+1. 为 `WSAStartup` 和各 Socket API 增加失败判断与可验证的清理路径；监听地址收敛到本机 loopback，并区分正常断开与 `recv` 错误。
+2. 首轮只处理 HELLO：合法请求依次返回 `ACK` payload `{0x01, 0x00}` 和 `STATUS` payload `{0x01}`；版本不匹配及未知命令按协议返回带错误码的 ERROR。
+3. 抽出能处理部分发送的 `send_all()`，完成静态复审后再经用户许可执行默认 MSVC 2022 + RelWithDebInfo 构建和简单客户端联调。
 
 ## 暂不开始
 
-- 设备模拟器、Qt GUI、SQLite、ONNX。
+- DATA 周期推流、完整 START/STOP 状态机、Qt GUI、SQLite、ONNX。
 - Modbus（未来选做，不插队）。
 

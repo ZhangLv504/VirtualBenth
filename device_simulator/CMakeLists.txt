@@ -1,5 +1,7 @@
 add_executable (device_simulator
     src/main.cpp
+		src/WinsockRuntime.cpp
+		src/WinsockRuntime.h
 ) 
 
 target_link_libraries (device_simulator PRIVATE
