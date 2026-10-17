@@ -152,3 +152,69 @@ TEST_CASE("stream_parser preserves the maximum incomplete frame", "[protocol][fe
     REQUIRE(frames[0].payload.back() == 0xBB);
     REQUIRE(stream_parser.buffered_size() == 0);
 }
+
+TEST_CASE("stream_parser handles reproducible uneven fragmentation across frames",
+          "[protocol][feed][fragmentation][magic]")
+{
+    Frame hello;
+    hello.command = Command::Hello;
+
+    Frame start;
+    start.command = Command::Start;
+    // sample_rate = 0x00005AA5，chan_mask = 0x01；payload 中的 A5 5A 不是帧起点。
+    start.payload = {0xA5, 0x5A, 0x00, 0x00, 0x01};
+
+    Frame stop;
+    stop.command = Command::Stop;
+
+    const EncodeResult hello_result = ProtocolCodec::encode(hello);
+    const EncodeResult start_result = ProtocolCodec::encode(start);
+    const EncodeResult stop_result = ProtocolCodec::encode(stop);
+    REQUIRE(hello_result.ok());
+    REQUIRE(start_result.ok());
+    REQUIRE(stop_result.ok());
+    REQUIRE(hello_result.bytes.size() == 8);
+    REQUIRE(start_result.bytes.size() == 13);
+    REQUIRE(stop_result.bytes.size() == 8);
+
+    std::vector<std::uint8_t> stream;
+    stream.insert(stream.end(), hello_result.bytes.begin(), hello_result.bytes.end());
+    stream.insert(stream.end(), start_result.bytes.begin(), start_result.bytes.end());
+    stream.insert(stream.end(), stop_result.bytes.begin(), stop_result.bytes.end());
+
+    // 固定分块既可复现，又会跨越帧边界，并把 START payload 中的 A5 与 5A 分到两次 feed。
+    const std::vector<std::size_t> chunk_sizes = {1, 4, 2, 7, 1, 5, 3, 6};
+    StreamParser stream_parser;
+    std::vector<Frame> parsed_frames;
+    std::size_t offset = 0;
+    std::size_t chunk_index = 0;
+
+    while (offset < stream.size())
+    {
+        const std::size_t remaining = stream.size() - offset;
+        const std::size_t requested_size = chunk_sizes[chunk_index % chunk_sizes.size()];
+        const std::size_t chunk_size = requested_size < remaining ? requested_size : remaining;
+        const std::vector<std::uint8_t> chunk(stream.begin() + offset,
+                                              stream.begin() + offset + chunk_size);
+        const std::vector<Frame> frames = stream_parser.feed(chunk);
+        parsed_frames.insert(parsed_frames.end(), frames.begin(), frames.end());
+        offset += chunk_size;
+        ++chunk_index;
+    }
+
+    REQUIRE(offset == stream.size());
+    REQUIRE(parsed_frames.size() == 3);
+
+    REQUIRE(parsed_frames[0].version == kProtocolVersion);
+    REQUIRE(parsed_frames[0].command == Command::Hello);
+    REQUIRE(parsed_frames[0].payload == hello.payload);
+
+    REQUIRE(parsed_frames[1].version == kProtocolVersion);
+    REQUIRE(parsed_frames[1].command == Command::Start);
+    REQUIRE(parsed_frames[1].payload == start.payload);
+
+    REQUIRE(parsed_frames[2].version == kProtocolVersion);
+    REQUIRE(parsed_frames[2].command == Command::Stop);
+    REQUIRE(parsed_frames[2].payload == stop.payload);
+    REQUIRE(stream_parser.buffered_size() == 0);
+}
