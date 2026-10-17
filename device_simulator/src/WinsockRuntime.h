@@ -1,118 +1,54 @@
 #ifndef VIRTUALBENTH_WINSOCKRUNTIME_H
 #define VIRTUALBENTH_WINSOCKRUNTIME_H
 
-#include <iostream>
-#include <string>
-#include <vector>
-#include <winsock2.h>
-#include "protocol/stream_parser.h"
-#include "protocol/frame.h"
-#include "protocol/protocol_codec.h"
+#include <cstdint>
 
-class WinsockRuntime
+// 本文件只暴露模拟器启动所需的最小接口。
+// Winsock、SOCKET、sockaddr_in 等 Windows 细节全部留在 .cpp 中，避免调用方
+// 仅仅包含本头文件就依赖 <winsock2.h>，也避免把具体传输实现扩散到业务层。
+
+// 进程级 Winsock 生命周期守卫。
+//
+// Windows 要求任何 Socket API 都必须位于一次成功的 WSAStartup() 与对应的
+// WSACleanup() 之间。本类把这对调用绑定到对象生命周期：构造失败会抛异常，
+// 构造成功后则保证析构时清理。main() 应先创建它，再创建或运行 TcpServer。
+class WinsockRuntime final
 {
 public:
-    WinsockRuntime()
-    {
-        WSADATA wsaData;
-        WSAStartup(MAKEWORD(2, 2), &wsaData);
-    }
+    // 请求 Winsock 2.2；初始化失败或系统没有协商到 2.2 时抛出 std::runtime_error。
+    WinsockRuntime();
 
-    ~WinsockRuntime() {
-        WSACleanup();
-    }
+    // 只释放构造函数已经成功取得的那一次 Winsock 初始化计数。
+    ~WinsockRuntime() noexcept;
+
+    // Winsock 初始化按调用次数计数。禁止复制和移动可避免多个对象对同一次
+    // WSAStartup() 重复执行 WSACleanup()，破坏进程级初始化计数。
+    WinsockRuntime(const WinsockRuntime&) = delete;
+    WinsockRuntime& operator=(const WinsockRuntime&) = delete;
+    WinsockRuntime(WinsockRuntime&&) = delete;
+    WinsockRuntime& operator=(WinsockRuntime&&) = delete;
 };
 
-class TcpServer
+// S7 的最小阻塞式 TCP 服务端。
+//
+// 当前边界刻意保持简单：绑定本机 loopback、阻塞等待一个客户端、在当前线程
+// 接收字节流，并完成 HELLO 的 ACK + STATUS(READY) 闭环。多客户端循环、
+// START/STOP 状态机和 DATA 周期推流属于后续阶段，不在此类当前职责内。
+class TcpServer final
 {
 public:
-    void run()
-    {
-        // 创建用于监听的套接字 (IPv4, TCP流协议)
-        listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    // port 使用主机字节序保存；填充 sockaddr_in 时再通过 htons() 转为网络字节序。
+    explicit TcpServer(std::uint16_t port = 12345) noexcept;
 
-        // 配置服务器的 IP 和 端口
-        sockaddr_in addr = {0};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(12345);   // 绑定 12345 端口
-        addr.sin_addr.s_addr = INADDR_ANY;      // 监听本机所有网卡 IP
-
-        // 将套接字与配置好的地址绑定
-        bind(listenSocket, (struct sockaddr *)&addr, sizeof(addr));
-
-        // 开始监听，SOMAXCONN 表示让操作系统决定最大积压连接数
-        listen(listenSocket, SOMAXCONN);
-
-        std::cout << "Server is listening on port 12345..." << std::endl;
-
-        // 取得一个客户端连接，成功返回一个新的客户端 Socket
-        SOCKET clientSocket = accept(listenSocket, NULL, NULL);
-        std::cout << "A client connected!" << std::endl;
-
-        StreamParser parser;
-        char buf[4096];
-
-        while (true)
-        {
-            // 从 TCP 字节流读取数据，返回值只是本次读取的字节数
-            int bytesRead = recv(clientSocket, buf, sizeof(buf), 0);
-            if (bytesRead <= 0)
-            {
-                std::cout << "Client disconnected or error occurred." << std::endl;
-                break;
-            }
-
-            std::vector<std::uint8_t> chunk(buf, buf + bytesRead);
-            std::vector<Frame> frames = parser.feed(chunk);
-
-            for (const auto& frame : frames)
-            {
-                std::cout << "Received complete frame CMD: " << static_cast<int>(frame.command) << std::endl;
-
-                if (frame.command == Command::Error)
-                {
-                    Frame errorFrame;
-                    errorFrame.command = Command::Error;
-                    EncodeResult errorResult = ProtocolCodec::encode(errorFrame);
-                    send_all(clientSocket, reinterpret_cast<const char*>(errorResult.bytes.data()), (int)errorResult.bytes.size());
-                    break;
-                }
-                else if (frame.command == Command::Hello)
-                {
-                    Frame ackFrame;
-                    ackFrame.command = Command::Ack;
-                    ackFrame.payload = {static_cast<std::uint8_t>(Command::Hello), 0x00};
-                    EncodeResult ackResult = ProtocolCodec::encode(ackFrame);
-                    send_all(clientSocket, reinterpret_cast<const char*>(ackResult.bytes.data()), (int)ackResult.bytes.size());
-
-                    Frame statusFrame;
-                    statusFrame.command = Command::Status;
-                    ackFrame.payload = {0x01};
-                    EncodeResult statusResult = ProtocolCodec::encode(statusFrame);
-                    send_all(clientSocket, reinterpret_cast<const char*>(statusResult.bytes.data()), (int)statusResult.bytes.size());
-                }
-            }
-        }
-
-        closesocket(clientSocket);
-        closesocket(listenSocket);
-    }
+    // 依次完成 socket → bind → listen → accept → recv/process/send。
+    // 返回 true：客户端正常断开，或服务端已按协议发送错误并主动关闭连接。
+    // 返回 false：Winsock API、协议编码或响应发送失败。
+    // 本函数为阻塞调用，直到当前唯一客户端会话结束才返回。
+    [[nodiscard]] bool run();
 
 private:
-    bool send_all(SOCKET sock, const char* data, int len)
-    {
-        int totalSent = 0;
-        while (totalSent < len)
-        {
-            int sent = send(sock, data + totalSent, len - totalSent, 0);
-            if (sent <= 0) return false;
-            totalSent += sent;
-        }
-        return true;
-    }
-
-    SOCKET listenSocket = 0;
+    // 保持主机字节序，便于日志输出和构造函数参数传递。
+    std::uint16_t port_;
 };
 
-
-#endif //VIRTUALBENTH_WINSOCKRUNTIME_H
+#endif // VIRTUALBENTH_WINSOCKRUNTIME_H

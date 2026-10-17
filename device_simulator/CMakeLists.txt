@@ -1,14 +1,20 @@
-add_executable (device_simulator
-    src/main.cpp
-		src/WinsockRuntime.cpp
-		src/WinsockRuntime.h
-) 
+# 当前 TCP 传输层直接使用 Winsock 类型和 API，因此只在 Windows 上创建目标。
+# 非 Windows 平台仍可配置并构建独立的 protocol 与 tests，不会被模拟器阻断。
+if (WIN32)
+    # 头文件也列入 target sources，便于 Visual Studio 在项目树中展示和编辑。
+    add_executable(device_simulator
+        src/main.cpp
+        src/WinsockRuntime.cpp
+        src/WinsockRuntime.h
+    )
 
-target_link_libraries (device_simulator PRIVATE
-    protocol
-)
-
-# 后面做 TCP 服务端要用 socket，Windows 下需要 Winsock 库 
-if (WIN32) 
-	target_link_libraries (device_simulator PRIVATE ws2_32) 
+    # protocol 提供 Frame、ProtocolCodec 和 StreamParser；ws2_32 提供
+    # WSAStartup/socket/bind/listen/accept/recv/send/closesocket 等符号。
+    target_link_libraries(device_simulator PRIVATE
+        protocol
+        ws2_32
+    )
+else ()
+    # 当前实现明确依赖 Winsock；未来增加 POSIX Socket 适配后再启用非 Windows 目标。
+    message(STATUS "device_simulator is skipped because the current transport uses Winsock")
 endif ()
