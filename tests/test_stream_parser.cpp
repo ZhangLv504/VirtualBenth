@@ -1,6 +1,7 @@
 #include "catch_amalgamated.hpp"
 
 #include "protocol/stream_parser.h"
+#include "protocol/protocol_codec.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -116,5 +117,38 @@ TEST_CASE("stream_parser resynchronizes after an oversized payload length", "[pr
     REQUIRE(frames[0].command == Command::Hello);
     REQUIRE(frames[0].version == kProtocolVersion);
     REQUIRE(frames[0].payload.empty());
+    REQUIRE(stream_parser.buffered_size() == 0);
+}
+
+// 增加一个最大合法帧的临界拆包测试：4103B 时必须等待，4104B 时必须成功解析
+TEST_CASE("stream_parser preserves the maximum incomplete frame", "[protocol][feed][boundary][max]")
+{
+    Frame frame;
+    frame.command = Command::Error;
+    frame.payload.assign(4096, 0x20);
+    frame.payload[0] = 0x05; // ERROR(INTERNAL) 的小端低字节
+    frame.payload[1] = 0x00;
+    frame.payload.back() = 0xBB;
+
+    const EncodeResult result = ProtocolCodec::encode(frame);
+    REQUIRE(result.ok());
+    REQUIRE(result.bytes.size() == 4104);
+
+    const std::vector<std::uint8_t> first_chunk(result.bytes.begin(), result.bytes.end() - 1);
+    const std::vector<std::uint8_t> final_chunk{result.bytes.back()};
+    StreamParser stream_parser;
+
+    const std::vector<Frame> incomplete_frames = stream_parser.feed(first_chunk);
+    REQUIRE(incomplete_frames.empty());
+    REQUIRE(stream_parser.buffered_size() == 4103);
+
+    const std::vector<Frame> frames = stream_parser.feed(final_chunk);
+    REQUIRE(frames.size() == 1);
+    REQUIRE(frames[0].command == Command::Error);
+    REQUIRE(frames[0].version == kProtocolVersion);
+    REQUIRE(frames[0].payload.size() == 4096);
+    REQUIRE(frames[0].payload == frame.payload);
+    REQUIRE(frames[0].payload.front() == 0x05);
+    REQUIRE(frames[0].payload.back() == 0xBB);
     REQUIRE(stream_parser.buffered_size() == 0);
 }
