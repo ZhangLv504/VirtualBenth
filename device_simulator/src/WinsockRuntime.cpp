@@ -237,21 +237,35 @@ namespace
 
 WinsockRuntime::WinsockRuntime()
 {
-    // WSAStartup() 是使用任何 Winsock API 的前置条件。这里请求 2.2，并检查
-    // 实际协商版本，防止程序在不满足预期 API 契约的运行时上继续执行。
+    // WSAStartup() 是使用任何 Winsock API 的前置条件：必须先成功初始化 Winsock，
+    // 之后才能调用任何 Winsock 函数。
+
+    // WSADATA 用于接收 WSAStartup 成功调用后返回的 Winsock 实现细节，
+    // 其中 wVersion 为实际协商到的版本，wHighVersion 为该实现支持的最高版本。
     WSADATA data{};
+
+    // MAKEWORD(主版本, 副版本) 将两个字节打包成一个 WORD（16 位整数）。
+    // MAKEWORD(2, 2) 即向系统请求使用 Winsock 2.2 版本。
     const WORD requested_version = MAKEWORD(2, 2);
+
     const int startup_result = WSAStartup(requested_version, &data);
+
+    // WSAStartup 返回 0 表示成功，非 0 即为错误码本身。
+    // 失败时 Winsock 尚未初始化，不会设置 "last error"，
+    // 因此必须直接使用返回值，不能依赖 WSAGetLastError()。
     if (startup_result != 0)
     {
-        // WSAStartup 直接返回错误码，失败时不能依赖 WSAGetLastError()。
         throw std::runtime_error(
             "WSAStartup failed, error=" + std::to_string(startup_result));
     }
 
+    // 校验实际协商到的版本是否为请求的 2.2：
+    // 若运行时只提供更低版本，WSAStartup 可能返回成功但 wVersion != 2.2，
+    // 此时继续执行会违反后续 API 的使用契约，故拒绝继续。
     if (data.wVersion != requested_version)
     {
-        // 构造函数抛出后析构函数不会运行，因此这里必须手动撤销成功的初始化。
+        // 构造函数抛出后析构函数不会运行，因此这里必须手动撤销已成功的初始化，
+        // 否则会泄漏 Winsock 的引用计数（每次成功 WSAStartup 都需配对的 WSACleanup）。
         WSACleanup();
         throw std::runtime_error("Winsock 2.2 is not available");
     }
