@@ -1,7 +1,9 @@
-#ifndef VIRTUALBENTH_WINSOCKRUNTIME_H
+﻿#ifndef VIRTUALBENTH_WINSOCKRUNTIME_H
 #define VIRTUALBENTH_WINSOCKRUNTIME_H
 
 #include <cstdint>
+
+#include "protocol/frame.h"
 
 // 本文件只暴露模拟器启动所需的最小接口。
 // Winsock、SOCKET、sockaddr_in 等 Windows 细节全部留在 .cpp 中，避免调用方
@@ -45,6 +47,11 @@ public:
     // 返回 false：Winsock API、协议编码或响应发送失败。
     // 本函数为阻塞调用，直到当前唯一客户端会话结束才返回。
     [[nodiscard]] bool run();
+
+    // 当前服务器状态
+    static SessionState sessionState_;
+    // 防止重复 HELLO
+    static bool isRepeatHello;
 
 private:
     // 保持主机字节序，便于日志输出和构造函数参数传递。

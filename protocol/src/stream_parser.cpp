@@ -1,4 +1,4 @@
-#include "protocol/stream_parser.h"
+﻿#include "protocol/stream_parser.h"
 
 #include "protocol/protocol_codec.h"
 

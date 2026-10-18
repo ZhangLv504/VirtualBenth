@@ -1,4 +1,4 @@
-#include "protocol/crc16.h"
+﻿#include "protocol/crc16.h"
 
 // 最基础的逐位实现，后续可替换为查表法
 uint16_t crc16_modbus(const uint8_t* data, std::size_t len) {

@@ -1,4 +1,4 @@
-#ifndef VIRTUALBENTH_FRAME_H
+﻿#ifndef VIRTUALBENTH_FRAME_H
 #define VIRTUALBENTH_FRAME_H
 
 #include <cstdint>
@@ -15,6 +15,15 @@ enum class Command : std::uint8_t
     Status      = 0x05,     // 状态通知
     Ack         = 0x06,     // 控制命令处理成功确认
     Error       = 0x7F,     // 错误通知
+};
+
+// 会话状态
+enum class SessionState : std::uint8_t
+{
+    AwaitHello,
+    Ready,
+    Running,
+    Idle
 };
 
 // 协议版本常量

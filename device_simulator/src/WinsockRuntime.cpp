@@ -1,4 +1,4 @@
-#include "WinsockRuntime.h"
+﻿#include "WinsockRuntime.h"
 
 // Windows 头可能定义 min/max 宏，NOMINMAX 确保下面使用的 std::min 不被宏替换。
 #define NOMINMAX
@@ -17,6 +17,11 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+// 当前服务器状态
+SessionState TcpServer::sessionState_{SessionState::AwaitHello};
+// 防止重复 HELLO
+bool TcpServer::isRepeatHello = false;
 
 namespace
 {
@@ -168,13 +173,13 @@ namespace
         return send_frame(socket, make_error_frame(error_code));
     }
 
-    // HELLO 成功是两个有顺序的独立帧：先确认命令处理成功，再发布 READY 状态。
+    // HELLO/START/STOP 成功是两个有顺序的独立帧：先确认命令处理成功，再发布 READY 状态。
     // ACK 发送失败后不能继续发 STATUS，否则客户端可能看到状态变化却没有确认帧。
-    [[nodiscard]] bool send_hello_success(SOCKET socket)
+    [[nodiscard]] bool send_success(SOCKET socket, Command command)
     {
         Frame ack_frame;
         ack_frame.command = Command::Ack;
-        ack_frame.payload = {static_cast<std::uint8_t>(Command::Hello), kAckOk};
+        ack_frame.payload = {static_cast<std::uint8_t>(command), kAckOk};
         if (!send_frame(socket, ack_frame))
         {
             return false;
@@ -182,14 +187,25 @@ namespace
 
         Frame status_frame;
         status_frame.command = Command::Status;
-        status_frame.payload = {kStatusReady};
+        status_frame.payload = {static_cast<std::uint8_t>(TcpServer::sessionState_)};
         return send_frame(socket, status_frame);
     }
+
 
     // 对 StreamParser 已验证过结构和 CRC 的完整帧执行业务语义检查。
     // 返回 FrameAction 而不是在此直接关闭 Socket，让连接循环统一决定生命周期。
     [[nodiscard]] FrameAction process_frame(SOCKET socket, const Frame& frame)
     {
+        // 防止重复 HELLO
+        if (TcpServer::isRepeatHello)
+        {
+            TcpServer::isRepeatHello = false;
+            return send_error(socket, kErrorBadState)
+                ? FrameAction::CloseConnection
+                : FrameAction::FatalError;
+        }
+        TcpServer::isRepeatHello = false;
+
         // decode 会保留 CRC 正确帧的原始版本；版本不匹配是业务错误，而非流同步错误。
         if (frame.version != kProtocolVersion)
         {
@@ -201,6 +217,7 @@ namespace
         switch (frame.command)
         {
         case Command::Hello:
+        {
             // V1 HELLO 的版本只存在于帧头中，payload 必须严格为空。
             if (!frame.payload.empty())
             {
@@ -209,12 +226,65 @@ namespace
                     : FrameAction::FatalError;
             }
 
-            return send_hello_success(socket)
-                ? FrameAction::KeepConnection
-                : FrameAction::FatalError;
+            if (send_success(socket, frame.command))
+            {
+                TcpServer::sessionState_ = SessionState::Ready;
+                TcpServer::isRepeatHello = true;
+                return FrameAction::KeepConnection;
+            }
+            return FrameAction::FatalError;
+        }
 
         case Command::Start:
+        {
+            if (frame.payload.size() != 5)
+            {
+                return send_error(socket, kErrorBadParameter)
+                    ? FrameAction::KeepConnection
+                    : FrameAction::FatalError;
+            }
+            std::uint32_t sample_rate = static_cast<std::uint32_t>(frame.payload[0]) | (static_cast<std::uint32_t>(frame.payload[1]) << 8) |
+                                        (static_cast<std::uint32_t>(frame.payload[2])  << 16) | (static_cast<std::uint32_t>(frame.payload[3]) << 24);
+            std::uint8_t chan_mask = frame.payload[4];
+            if (sample_rate == 0 || chan_mask == 0)
+            {
+                return send_error(socket, kErrorBadParameter)
+                    ? FrameAction::KeepConnection
+                    : FrameAction::FatalError;
+            }
+
+            if (TcpServer::sessionState_ != SessionState::Ready && TcpServer::sessionState_ != SessionState::Idle)
+            {
+                return send_error(socket, kErrorBadState)
+                    ? FrameAction::KeepConnection
+                    : FrameAction::FatalError;
+            }
+
+            if (send_success(socket, frame.command))
+            {
+                TcpServer::sessionState_ = SessionState::Running;
+                return FrameAction::KeepConnection;
+            }
+            return FrameAction::FatalError;
+        }
+
         case Command::Stop:
+        {
+            if (!frame.payload.empty())
+            {
+                return send_error(socket, kErrorBadParameter)
+                    ? FrameAction::KeepConnection
+                    : FrameAction::FatalError;
+            }
+
+            if (send_success(socket, frame.command))
+            {
+                TcpServer::sessionState_ = SessionState::Idle;
+                return FrameAction::KeepConnection;
+            }
+            return FrameAction::FatalError;
+        }
+
         case Command::Data:
         case Command::Status:
         case Command::Ack:

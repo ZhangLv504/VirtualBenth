@@ -1,14 +1,14 @@
 # VirtualBenth 项目进度
 
-> 最近核对：2026-10-17（Asia/Shanghai）
+> 最近核对：2026-10-18（Asia/Shanghai）
 > 用途：给当前与新会话提供动态交接。开始工作时仍须核对 Git、实际文件和最新测试输出。
 
 ## 当前阶段
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
-- 学习会话：S6 测试与代码审查已结束，进入 S7 模拟器起步。
-- 当前状态：`protocol`、`ProtocolCodec`、`StreamParser` 及当前全部协议测试已在默认 MSVC 2022 + RelWithDebInfo 环境通过；S7 首版提交为 `92c7a17`，本轮已直接补齐 Socket/WSA 错误边界、RAII 清理和合规 HELLO 响应，并按生命周期、TCP 语义和八阶段服务流程扩充核心注释；静态复核未发现新的阻断项，但修改尚未构建或联调。
-- 当前唯一目标：取得用户许可后，在默认 MSVC 2022 + RelWithDebInfo 环境构建 `device_simulator`，再用简单客户端验证 HELLO 成功、版本错误及未知命令三个最小闭环。
+- 学习会话：S7 模拟器起步已通过构建、协议回归和 NetAssist 手工联调验收。
+- 当前状态：`protocol`、`ProtocolCodec`、`StreamParser` 及当前全部协议测试已在默认 MSVC 2022 + RelWithDebInfo 环境通过；`device_simulator` 已完成单客户端 Winsock 服务端与 HELLO 最小闭环，合法 HELLO、版本不匹配和未知命令三条路径均获得真实 TCP 字节证据。
+- 当前唯一目标：进入 W2 的下一个小里程碑，先冻结 START/STOP 的最小会话状态与响应矩阵，再实现控制状态机；暂不开始 DATA 周期推流。
 
 ## 默认构建环境
 
@@ -61,24 +61,29 @@
 - 2026-10-17 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：35 个测试用例、182 个断言全部通过。
 - 2026-10-17 新增全部二段切点测试后执行 `cmake --build build --config RelWithDebInfo --target protocol_tests --verbose` 成功；日志确认 `test_stream_parser.cpp` 由 MSVC 14.38 以 C++17、RelWithDebInfo 参数重新编译并重新链接，0 警告、0 错误。
 - 2026-10-17 随后执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：36 个测试用例、268 个断言全部通过。
+- 2026-10-18 核对 `build/CMakeCache.txt` 和编译器识别文件：生成器为 Visual Studio 17 2022、x64、多配置，MSVC 19.38.33145.0，工具集目录 14.38.33130；继续使用 `RelWithDebInfo`。
+- 2026-10-18 执行 `cmake --build build --config RelWithDebInfo --target device_simulator protocol_tests --verbose` 成功；`main.cpp`、`WinsockRuntime.cpp` 以 C++17、RelWithDebInfo 实际重新编译并链接 `device_simulator.exe`，0 警告、0 错误。
+- 2026-10-18 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行测试程序：36 个测试用例、268 个断言全部通过。
+- 2026-10-18 13:53:28 用户使用 NetAssist 向 `127.0.0.1:12345` 发送合法 HELLO `A5 5A 01 01 00 00 50 18`，服务端一次接收记录返回精确 19B：ACK(HELLO, OK) `A5 5A 01 06 02 00 01 00 89 E2` 与 STATUS(READY) `A5 5A 01 05 01 00 01 89 0C`。
+- 2026-10-18 13:54:14 用户发送版本 2 HELLO `A5 5A 02 01 00 00 50 5C`，服务端返回精确 ERROR(VER_MISMATCH) `A5 5A 01 7F 02 00 02 00 14 D8`，随后主动断开，符合协议。
+- 2026-10-18 13:56:33 用户发送未知命令 `0x55` 帧，服务端返回精确 ERROR(UNKNOWN_CMD) `A5 5A 01 7F 02 00 01 00 14 28`；13:56:54 在同一连接继续发送合法 HELLO 后仍收到正确 19B ACK+READY，证明未知命令不会关闭或破坏连接。
 
 ## 已实现但未验证
 
-- `WinsockRuntime` 已改为不可复制的进程级 RAII 守卫：检查 `WSAStartup()` 返回值和 2.2 版本，并保证每次成功初始化都与一次 `WSACleanup()` 配对。
-- `TcpServer::run()` 已逐项检查 `socket/bind/listen/accept/recv/send`，用局部 `SocketHandle` 覆盖提前返回和异常清理，监听范围收敛为 `127.0.0.1`，并区分正常断开与网络错误。
-- HELLO 业务路径已按协议构造 2B ACK 与 1B READY 状态；版本不匹配发送 `VER_MISMATCH` 后关闭，未知命令发送 `UNKNOWN_CMD`，异常响应均使用至少 2B 的小端错误码；`send_all()` 会处理部分发送。
-- 上述模拟器修正只完成静态复核，尚未执行 MSVC 2022 + RelWithDebInfo 构建、测试或真实客户端联调，不能记录为可运行或验收通过。
+- 当前没有尚未验证的 S7 代码修改；最新实现已包含在 `f091fef`，并已有默认环境构建、协议回归及三条 NetAssist 联调证据。
+- NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
 
 ## 待处理/已知问题
 
 - 旧 VS2019 + Ninja 构建树在助手环境持续报 MSVC `C1902`，原因指向 14.29 PDB 工具组件版本不一致；该问题保留为历史环境记录，但 VS2019 已不再是当前默认门槛，不阻断后续主线。
-- 当前未发现新的静态阻断项；风险集中在尚未经过编译器和端到端客户端验证，尤其需要确认 MSVC/Winsock API 签名、实际响应字节及错误后连接处置。
-- 当前仍是单客户端、单次 `accept()` 的 S7 最小实现；START/STOP、DATA 推流和连续接受新客户端不在本轮验收范围，暂以 `BAD_STATE` 拒绝已定义但尚未实现的非 HELLO 命令。
+- 当前仍是单客户端、单次 `accept()` 的 S7 最小实现；连接结束后服务端进程退出，尚不能连续接受新客户端。
+- START/STOP 状态机和 DATA 推流尚未实现；当前对已定义但尚未处理的非 HELLO 命令返回 `BAD_STATE`。
+- `send_all()` 的部分发送分支和各 Winsock 失败清理路径已有代码审查与构建证据，但尚未通过故障注入强制触发。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-10-17 本轮开始时核对，本地 `main`、`origin/main` 与 `HEAD 92c7a17` 一致且工作区干净；用户已提交首版服务端、使用指南和上一轮进度记录。本轮随后直接修改 `device_simulator/CMakeLists.txt`、`src/main.cpp`、`src/WinsockRuntime.h`、`src/WinsockRuntime.cpp`，并维护本进度与自测题，均尚未提交。
+- 2026-10-18 联调前核对，本地 `main`、`origin/main` 与 `HEAD f091fef` 一致；`f091fef` 已包含完善后的服务端实现及扩充注释。当前未提交修改仅为本轮维护的 `PROJECT_PROGRESS.md` 和 `Doc/自测题.md`。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -113,15 +118,17 @@
 19. 2026-10-17 对用户提交的首版 Winsock 服务端完成静态审查：确认网络主流程已经搭出，但发现未检查 Winsock/Socket API 结果、HELLO 响应 payload 不符合权威协议、未处理 `send()` 部分发送等阻断项；本轮未修改实现，未运行构建、测试或联调。
 20. 2026-10-17 复审提交 `92c7a17` 后发现 STATUS payload 误写到 `ackFrame`，且 Winsock 返回值与清理缺口仍在；按用户授权直接修正为声明/实现分离、`WinsockRuntime` 与 `SocketHandle` RAII、逐项错误检查、loopback 监听、完整 `send_all()`、HELLO/ERROR 业务分发及明确退出码，并补充关键生命周期与 TCP 语义注释。静态复核及 `git diff --check` 未发现问题，本轮未运行构建、测试或联调。
 21. 2026-10-17 根据用户反馈继续扩充模拟器注释：头文件明确公开接口、生命周期和当前阶段边界；实现文件解释匿名命名空间、协议常量、Socket 所有权、部分发送、帧构造、错误分发，以及 `socket → bind → listen → accept → recv → parse → process` 各阶段的不变量与失败语义；未改变功能范围。本轮未运行构建、测试或联调。
+22. 2026-10-18 经用户许可核对默认缓存后构建 `device_simulator` 与 `protocol_tests`：模拟器实际重新编译并链接，0 警告、0 错误；随后 CTest 1/1、Catch2 36 个用例和 268 个断言全部通过。
+23. 2026-10-18 用户使用 NetAssist 完成三条真实 TCP 验收：合法 HELLO 返回精确 ACK+READY，版本不匹配返回 VER_MISMATCH 后断开，未知命令返回 UNKNOWN_CMD 且连接可继续完成 HELLO。S7 最小 TCP 服务端闭环据此验收通过。
 
 ## 下一步流程
 
-1. 取得用户对构建和运行联调测试的明确许可。
-2. 核对 `build/CMakeCache.txt` 后，以 `--config RelWithDebInfo` 构建 `device_simulator` 和既有 `protocol_tests`，运行 CTest 回归。
-3. 启动模拟器并用测试客户端验证合法 HELLO、版本不匹配和未知命令的精确响应及连接处置，再据真实输出决定 S7 是否验收通过。
+1. 对照协议冻结 START/STOP 的合法状态转换、payload 校验、ACK/STATUS 顺序和 ERROR 分支。
+2. 只实现最小会话状态机，不同时加入 DATA 定时器、多客户端循环或线程。
+3. 静态审查通过后，再经用户许可执行默认环境构建、协议回归和 NetAssist 控制命令联调。
 
 ## 暂不开始
 
-- DATA 周期推流、完整 START/STOP 状态机、Qt GUI、SQLite、ONNX。
+- DATA 周期推流、多客户端循环、Qt GUI、SQLite、ONNX。
 - Modbus（未来选做，不插队）。
 
