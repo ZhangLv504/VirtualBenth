@@ -48,8 +48,6 @@ public:
     // 本函数为阻塞调用，直到当前唯一客户端会话结束才返回。
     [[nodiscard]] bool run();
 
-    // 当前服务器状态
-    static SessionState sessionState_;
     // 防止重复 HELLO
     static bool isRepeatHello;
 

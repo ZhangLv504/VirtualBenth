@@ -1,14 +1,14 @@
 # VirtualBenth 项目进度
 
-> 最近核对：2026-10-18（Asia/Shanghai）
+> 最近核对：2026-10-19（Asia/Shanghai）
 > 用途：给当前与新会话提供动态交接。开始工作时仍须核对 Git、实际文件和最新测试输出。
 
 ## 当前阶段
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：`protocol`、`ProtocolCodec`、`StreamParser` 及当前全部协议测试已在默认 MSVC 2022 + RelWithDebInfo 环境通过；`device_simulator` 已完成单客户端 Winsock 服务端与 HELLO 最小闭环，合法 HELLO、版本不匹配和未知命令三条路径均获得真实 TCP 字节证据。
-- 当前唯一目标：进入 W2 的下一个小里程碑，先冻结 START/STOP 的最小会话状态与响应矩阵，再实现控制状态机；暂不开始 DATA 周期推流。
+- 当前状态：S7 的既有 HELLO 最小闭环仍有历史验证证据；提交 `efe5eac` 已写入 START/STOP 状态机，工作区另补了 STOP 状态检查，但 2026-10-19 静态审查发现响应状态、重复 HELLO 判定和会话状态所有权存在阻断问题，因此新状态机尚未通过验收。
+- 当前唯一目标：修正 START/STOP 状态机的三个静态阻断项并完成复审；暂不运行构建或开始 DATA 周期推流。
 
 ## 默认构建环境
 
@@ -70,20 +70,22 @@
 
 ## 已实现但未验证
 
-- 当前没有尚未验证的 S7 代码修改；最新实现已包含在 `f091fef`，并已有默认环境构建、协议回归及三条 NetAssist 联调证据。
+- 提交 `efe5eac` 已加入 START 参数长度/数值检查、START 状态检查、ACK/STATUS 成功响应和状态转换；工作区另加入 STOP 必须处于 `Running` 的检查。这些修改尚未构建、测试或联调。
+- 现有代码已能按小端序读取 START 的 4B `sample_rate`，并拒绝 `sample_rate == 0`、`chan_mask == 0` 和非空 STOP payload；上述局部分支已通过静态核对，但不代表完整会话路径可用。
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
 
 ## 待处理/已知问题
 
 - 旧 VS2019 + Ninja 构建树在助手环境持续报 MSVC `C1902`，原因指向 14.29 PDB 工具组件版本不一致；该问题保留为历史环境记录，但 VS2019 已不再是当前默认门槛，不阻断后续主线。
 - 当前仍是单客户端、单次 `accept()` 的 S7 最小实现；连接结束后服务端进程退出，尚不能连续接受新客户端。
-- START/STOP 状态机和 DATA 推流尚未实现；当前对已定义但尚未处理的非 HELLO 命令返回 `BAD_STATE`。
+- START/STOP 状态机当前存在三个阻断项：`send_success()` 发送转换前的内部枚举值；`isRepeatHello` 会把 HELLO 后的任意下一帧误判并关闭连接；会话状态使用公开静态成员而非当前连接的局部状态。修正前无法完成 `HELLO → START → STOP`。
+- `Doc/当前项目代码流程图.md` 仍写着 START/STOP 未实现，与提交 `efe5eac` 后的实际代码不一致；应在功能修正后同步更新，避免把过时流程当成当前事实。
 - `send_all()` 的部分发送分支和各 Winsock 失败清理路径已有代码审查与构建证据，但尚未通过故障注入强制触发。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-10-18 联调前核对，本地 `main`、`origin/main` 与 `HEAD f091fef` 一致；`f091fef` 已包含完善后的服务端实现及扩充注释。当前未提交修改仅为本轮维护的 `PROJECT_PROGRESS.md` 和 `Doc/自测题.md`。
+- 2026-10-19 核对时本地 `main`、`origin/main` 与 `HEAD efe5eac` 一致；该提交包含 START/STOP 状态机及较大范围文档/编码修改。用户工作区另有 `device_simulator/src/WinsockRuntime.cpp` 的 STOP 状态检查，需保留并纳入后续修正。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -120,12 +122,13 @@
 21. 2026-10-17 根据用户反馈继续扩充模拟器注释：头文件明确公开接口、生命周期和当前阶段边界；实现文件解释匿名命名空间、协议常量、Socket 所有权、部分发送、帧构造、错误分发，以及 `socket → bind → listen → accept → recv → parse → process` 各阶段的不变量与失败语义；未改变功能范围。本轮未运行构建、测试或联调。
 22. 2026-10-18 经用户许可核对默认缓存后构建 `device_simulator` 与 `protocol_tests`：模拟器实际重新编译并链接，0 警告、0 错误；随后 CTest 1/1、Catch2 36 个用例和 268 个断言全部通过。
 23. 2026-10-18 用户使用 NetAssist 完成三条真实 TCP 验收：合法 HELLO 返回精确 ACK+READY，版本不匹配返回 VER_MISMATCH 后断开，未知命令返回 UNKNOWN_CMD 且连接可继续完成 HELLO。S7 最小 TCP 服务端闭环据此验收通过。
+24. 2026-10-19 静态审查提交 `efe5eac` 与工作区 STOP 补丁：START 参数和 STOP payload 校验方向正确，但发现成功 STATUS 发送旧状态、重复 HELLO 标志拦截任意下一帧并错误关闭连接、状态被放入公开静态成员三个阻断项；本轮未修改核心实现，未运行构建或测试。
 
 ## 下一步流程
 
-1. 对照协议冻结 START/STOP 的合法状态转换、payload 校验、ACK/STATUS 顺序和 ERROR 分支。
-2. 只实现最小会话状态机，不同时加入 DATA 定时器、多客户端循环或线程。
-3. 静态审查通过后，再经用户许可执行默认环境构建、协议回归和 NetAssist 控制命令联调。
+1. 删除 `isRepeatHello`，改为用当前命令和 `SessionState` 判断重复 HELLO；`BAD_STATE` 后保持连接及状态不变。
+2. 将状态改为当前连接的局部变量，并让成功响应显式接收目标 STATUS，避免内部枚举直接映射到线上状态或发送转换前状态。
+3. 修正后先静态复审；通过后再经用户许可执行默认环境构建、协议回归和 NetAssist 控制命令联调。
 
 ## 暂不开始
 

@@ -18,8 +18,6 @@
 #include <string>
 #include <vector>
 
-// 当前服务器状态
-SessionState TcpServer::sessionState_{SessionState::AwaitHello};
 // 防止重复 HELLO
 bool TcpServer::isRepeatHello = false;
 
@@ -175,7 +173,7 @@ namespace
 
     // HELLO/START/STOP 成功是两个有顺序的独立帧：先确认命令处理成功，再发布 READY 状态。
     // ACK 发送失败后不能继续发 STATUS，否则客户端可能看到状态变化却没有确认帧。
-    [[nodiscard]] bool send_success(SOCKET socket, Command command)
+    [[nodiscard]] bool send_success(SOCKET socket, Command command, SessionState& session_state)
     {
         Frame ack_frame;
         ack_frame.command = Command::Ack;
@@ -185,27 +183,30 @@ namespace
             return false;
         }
 
+        if (command == Command::Hello)
+        {
+            session_state = SessionState::Ready;
+        }
+        else if (command == Command::Start)
+        {
+            session_state = SessionState::Running;
+        }
+        else if (command == Command::Stop)
+        {
+            session_state = SessionState::Idle;
+        }
+
         Frame status_frame;
         status_frame.command = Command::Status;
-        status_frame.payload = {static_cast<std::uint8_t>(TcpServer::sessionState_)};
+        status_frame.payload = {static_cast<std::uint8_t>(session_state)};
         return send_frame(socket, status_frame);
     }
 
 
     // 对 StreamParser 已验证过结构和 CRC 的完整帧执行业务语义检查。
     // 返回 FrameAction 而不是在此直接关闭 Socket，让连接循环统一决定生命周期。
-    [[nodiscard]] FrameAction process_frame(SOCKET socket, const Frame& frame)
+    [[nodiscard]] FrameAction process_frame(SOCKET socket, const Frame& frame, SessionState& session_state)
     {
-        // 防止重复 HELLO
-        if (TcpServer::isRepeatHello)
-        {
-            TcpServer::isRepeatHello = false;
-            return send_error(socket, kErrorBadState)
-                ? FrameAction::CloseConnection
-                : FrameAction::FatalError;
-        }
-        TcpServer::isRepeatHello = false;
-
         // decode 会保留 CRC 正确帧的原始版本；版本不匹配是业务错误，而非流同步错误。
         if (frame.version != kProtocolVersion)
         {
@@ -218,6 +219,14 @@ namespace
         {
         case Command::Hello:
         {
+            // 防止重复 HELLO
+            if (TcpServer::isRepeatHello)
+            {
+                return send_error(socket, kErrorBadState)
+                    ? FrameAction::CloseConnection
+                    : FrameAction::FatalError;
+            }
+
             // V1 HELLO 的版本只存在于帧头中，payload 必须严格为空。
             if (!frame.payload.empty())
             {
@@ -226,9 +235,8 @@ namespace
                     : FrameAction::FatalError;
             }
 
-            if (send_success(socket, frame.command))
+            if (send_success(socket, frame.command, session_state))
             {
-                TcpServer::sessionState_ = SessionState::Ready;
                 TcpServer::isRepeatHello = true;
                 return FrameAction::KeepConnection;
             }
@@ -253,16 +261,15 @@ namespace
                     : FrameAction::FatalError;
             }
 
-            if (TcpServer::sessionState_ != SessionState::Ready && TcpServer::sessionState_ != SessionState::Idle)
+            if (session_state != SessionState::Ready && session_state!= SessionState::Idle)
             {
                 return send_error(socket, kErrorBadState)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
 
-            if (send_success(socket, frame.command))
+            if (send_success(socket, frame.command, session_state))
             {
-                TcpServer::sessionState_ = SessionState::Running;
                 return FrameAction::KeepConnection;
             }
             return FrameAction::FatalError;
@@ -277,9 +284,15 @@ namespace
                     : FrameAction::FatalError;
             }
 
-            if (send_success(socket, frame.command))
+                if (session_state != SessionState::Running)
+                {
+                    return send_error(socket, kErrorBadState)
+                        ? FrameAction::KeepConnection
+                        : FrameAction::FatalError;
+                }
+
+            if (send_success(socket, frame.command, session_state))
             {
-                TcpServer::sessionState_ = SessionState::Idle;
                 return FrameAction::KeepConnection;
             }
             return FrameAction::FatalError;
@@ -302,6 +315,8 @@ namespace
                 ? FrameAction::KeepConnection
                 : FrameAction::FatalError;
         }
+
+        TcpServer::isRepeatHello = false;
     }
 } // namespace
 
@@ -401,6 +416,9 @@ bool TcpServer::run()
         return false;
     }
 
+    // 当前服务器状态
+    SessionState session_state{SessionState::AwaitHello};
+
     std::cout << "A client connected\n";
 
     // 阶段 6：为当前连接建立独立接收状态。
@@ -447,7 +465,7 @@ bool TcpServer::run()
 
             // 阶段 8：逐帧执行业务响应。发送失败与协议要求关闭必须立即终止
             // 当前批次，不能继续处理同一 recv() 中排在后面的 Frame。
-            const FrameAction action = process_frame(client_socket.get(), frame);
+            const FrameAction action = process_frame(client_socket.get(), frame, session_state);
             if (action == FrameAction::FatalError)
             {
                 return false;
