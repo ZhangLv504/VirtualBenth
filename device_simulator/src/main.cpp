@@ -3,15 +3,9 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
-#if (WIN32)
-#include <windows.h>
-#endif
 
-int main() {
-    SetConsoleOutputCP(CP_UTF8);  // 让控制台按 UTF-8 解码输出
-
-    std::cerr << "测试中文"<< '\n';
-
+int main()
+{
     // 所有初始化和服务端执行都放在同一个异常边界内：Winsock 初始化失败、
     // 标准容器分配失败等异常最终都会转成非零进程退出码，而不是无提示终止。
     try

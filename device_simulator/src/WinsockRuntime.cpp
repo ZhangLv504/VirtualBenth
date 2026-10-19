@@ -18,16 +18,27 @@
 #include <string>
 #include <vector>
 
-// 防止重复 HELLO
-bool TcpServer::isRepeatHello = false;
-
 namespace
 {
+    // 这是当前 TCP 连接的内部业务状态，不是 STATUS 帧的线上状态码。
+    // AwaitHello 在线上没有对应值，因此禁止直接 static_cast 后发送。
+    enum class SessionState
+    {
+        AwaitHello,
+        Ready,
+        Running,
+        Idle,
+    };
+
     // “ACK 成功”“READY 状态”“错误类型”，而不是散落难以审查的裸十六进制数。
     // 0x00 表示 ACK 处理结果为 OK
     constexpr std::uint8_t kAckOk = 0x00;
+    // 0x00 表示设备已完成握手、当前处于空闲且未采样状态
+    constexpr std::uint8_t kStatusIdle = 0x00;
     // 0x01 表示设备状态为 READY，含义为 HELLO 成功，待命
     constexpr std::uint8_t kStatusReady = 0x01;
+    // 0x02 表示设备正在采集中；当前里程碑只维护状态，尚不推送 DATA
+    constexpr std::uint8_t kStatusRunning = 0x02;
     // 0x0001 对应 UNKNOWN_CMD 错误码，表示收到未定义的 cmd
     constexpr std::uint16_t kErrorUnknownCommand = 0x0001;
     // 0x0002 对应 VER_MISMATCH 错误码，表示协议版本不一致
@@ -171,9 +182,13 @@ namespace
         return send_frame(socket, make_error_frame(error_code));
     }
 
-    // HELLO/START/STOP 成功是两个有顺序的独立帧：先确认命令处理成功，再发布 READY 状态。
-    // ACK 发送失败后不能继续发 STATUS，否则客户端可能看到状态变化却没有确认帧。
-    [[nodiscard]] bool send_success(SOCKET socket, Command command, SessionState& session_state)
+    // HELLO/START/STOP 成功时必须先发送 ACK，再发布该命令完成后的目标 STATUS。
+    // 目标状态码由调用方显式传入，避免把包含 AwaitHello 的内部枚举误当成线上值。
+    // 任一帧发送失败都返回 false；调用方只有在两帧全部发送成功后才提交内部状态。
+    [[nodiscard]] bool send_success(
+        SOCKET socket,
+        Command command,
+        std::uint8_t target_status)
     {
         Frame ack_frame;
         ack_frame.command = Command::Ack;
@@ -183,22 +198,9 @@ namespace
             return false;
         }
 
-        if (command == Command::Hello)
-        {
-            session_state = SessionState::Ready;
-        }
-        else if (command == Command::Start)
-        {
-            session_state = SessionState::Running;
-        }
-        else if (command == Command::Stop)
-        {
-            session_state = SessionState::Idle;
-        }
-
         Frame status_frame;
         status_frame.command = Command::Status;
-        status_frame.payload = {static_cast<std::uint8_t>(session_state)};
+        status_frame.payload = {target_status};
         return send_frame(socket, status_frame);
     }
 
@@ -219,14 +221,6 @@ namespace
         {
         case Command::Hello:
         {
-            // 防止重复 HELLO
-            if (TcpServer::isRepeatHello)
-            {
-                return send_error(socket, kErrorBadState)
-                    ? FrameAction::CloseConnection
-                    : FrameAction::FatalError;
-            }
-
             // V1 HELLO 的版本只存在于帧头中，payload 必须严格为空。
             if (!frame.payload.empty())
             {
@@ -235,9 +229,18 @@ namespace
                     : FrameAction::FatalError;
             }
 
-            if (send_success(socket, frame.command, session_state))
+            // HELLO 只允许在刚建立连接、尚未握手时执行。重复 HELLO 属于
+            // BAD_STATE，但协议规定该错误不关闭连接，也不能改变当前状态。
+            if (session_state != SessionState::AwaitHello)
             {
-                TcpServer::isRepeatHello = true;
+                return send_error(socket, kErrorBadState)
+                    ? FrameAction::KeepConnection
+                    : FrameAction::FatalError;
+            }
+
+            if (send_success(socket, frame.command, kStatusReady))
+            {
+                session_state = SessionState::Ready;
                 return FrameAction::KeepConnection;
             }
             return FrameAction::FatalError;
@@ -251,25 +254,32 @@ namespace
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
-            std::uint32_t sample_rate = static_cast<std::uint32_t>(frame.payload[0]) | (static_cast<std::uint32_t>(frame.payload[1]) << 8) |
-                                        (static_cast<std::uint32_t>(frame.payload[2])  << 16) | (static_cast<std::uint32_t>(frame.payload[3]) << 24);
-            std::uint8_t chan_mask = frame.payload[4];
-            if (sample_rate == 0 || chan_mask == 0)
+            // START 的前 4B 是显式小端 sample_rate，不能依赖主机字节序或
+            // 直接把 payload 内存解释成 uint32_t（还可能违反对齐要求）。
+            const std::uint32_t sample_rate =
+                static_cast<std::uint32_t>(frame.payload[0]) |
+                (static_cast<std::uint32_t>(frame.payload[1]) << 8) |
+                (static_cast<std::uint32_t>(frame.payload[2]) << 16) |
+                (static_cast<std::uint32_t>(frame.payload[3]) << 24);
+            const std::uint8_t channel_mask = frame.payload[4];
+            if (sample_rate == 0 || channel_mask == 0)
             {
                 return send_error(socket, kErrorBadParameter)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
 
-            if (session_state != SessionState::Ready && session_state!= SessionState::Idle)
+            if (session_state != SessionState::Ready &&
+                session_state != SessionState::Idle)
             {
                 return send_error(socket, kErrorBadState)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
 
-            if (send_success(socket, frame.command, session_state))
+            if (send_success(socket, frame.command, kStatusRunning))
             {
+                session_state = SessionState::Running;
                 return FrameAction::KeepConnection;
             }
             return FrameAction::FatalError;
@@ -284,15 +294,16 @@ namespace
                     : FrameAction::FatalError;
             }
 
-                if (session_state != SessionState::Running)
-                {
-                    return send_error(socket, kErrorBadState)
-                        ? FrameAction::KeepConnection
-                        : FrameAction::FatalError;
-                }
-
-            if (send_success(socket, frame.command, session_state))
+            if (session_state != SessionState::Running)
             {
+                return send_error(socket, kErrorBadState)
+                    ? FrameAction::KeepConnection
+                    : FrameAction::FatalError;
+            }
+
+            if (send_success(socket, frame.command, kStatusIdle))
+            {
+                session_state = SessionState::Idle;
                 return FrameAction::KeepConnection;
             }
             return FrameAction::FatalError;
@@ -302,8 +313,8 @@ namespace
         case Command::Status:
         case Command::Ack:
         case Command::Error:
-            // 当前只验收 HELLO。START/STOP 状态机尚未实现，而 DATA/STATUS/
-            // ACK/ERROR 又不应由 host 发给 device；这些帧不能被伪装成成功处理。
+            // DATA/STATUS/ACK/ERROR 不应由 host 发给 device；这些已定义但方向
+            // 不合法的帧使用 BAD_STATE，且保持当前连接与会话状态不变。
             return send_error(socket, kErrorBadState)
                 ? FrameAction::KeepConnection
                 : FrameAction::FatalError;
@@ -315,8 +326,6 @@ namespace
                 ? FrameAction::KeepConnection
                 : FrameAction::FatalError;
         }
-
-        TcpServer::isRepeatHello = false;
     }
 } // namespace
 

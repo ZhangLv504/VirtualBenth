@@ -3,8 +3,6 @@
 
 #include <cstdint>
 
-#include "protocol/frame.h"
-
 // 本文件只暴露模拟器启动所需的最小接口。
 // Winsock、SOCKET、sockaddr_in 等 Windows 细节全部留在 .cpp 中，避免调用方
 // 仅仅包含本头文件就依赖 <winsock2.h>，也避免把具体传输实现扩散到业务层。
@@ -34,8 +32,8 @@ public:
 // S7 的最小阻塞式 TCP 服务端。
 //
 // 当前边界刻意保持简单：绑定本机 loopback、阻塞等待一个客户端、在当前线程
-// 接收字节流，并完成 HELLO 的 ACK + STATUS(READY) 闭环。多客户端循环、
-// START/STOP 状态机和 DATA 周期推流属于后续阶段，不在此类当前职责内。
+// 接收字节流，并完成 HELLO/START/STOP 的最小控制状态机。多客户端循环与
+// DATA 周期推流属于后续阶段，不在此类当前职责内。
 class TcpServer final
 {
 public:
@@ -47,9 +45,6 @@ public:
     // 返回 false：Winsock API、协议编码或响应发送失败。
     // 本函数为阻塞调用，直到当前唯一客户端会话结束才返回。
     [[nodiscard]] bool run();
-
-    // 防止重复 HELLO
-    static bool isRepeatHello;
 
 private:
     // 保持主机字节序，便于日志输出和构造函数参数传递。

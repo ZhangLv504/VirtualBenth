@@ -17,15 +17,6 @@ enum class Command : std::uint8_t
     Error       = 0x7F,     // 错误通知
 };
 
-// 会话状态
-enum class SessionState : std::uint8_t
-{
-    AwaitHello,
-    Ready,
-    Running,
-    Idle
-};
-
 // 协议版本常量
 inline constexpr std::uint8_t kProtocolVersion = 0x01;
 
