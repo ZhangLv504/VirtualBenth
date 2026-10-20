@@ -75,12 +75,30 @@ namespace
             }
         }
 
-        // 当前最小实现不需要转移所有权。完全禁止复制/移动可确保始终只有一个
-        // 对象负责关闭句柄，避免 double-close 或悬空句柄。
+        // 禁止拷贝：句柄只有一个所有者，复制会导致 double-close。
         SocketHandle(const SocketHandle&) = delete;
         SocketHandle& operator=(const SocketHandle&) = delete;
-        SocketHandle(SocketHandle&&) = delete;
-        SocketHandle& operator=(SocketHandle&&) = delete;
+
+        // 允许移动：转移所有权，源对象置为 INVALID_SOCKET，
+        // 这样源对象析构时不会关闭已转移出去的句柄。
+        // noexcept 很关键：vector 扩容时会优先用它（否则异常安全要回退到拷贝，
+        // 而拷贝已删除，会导致 vector 扩容失败/编译报错）
+        SocketHandle(SocketHandle&& other) noexcept
+            : socket_(other.socket_)
+        {
+            other.socket_ = INVALID_SOCKET;
+        }
+
+        SocketHandle& operator=(SocketHandle&& other) noexcept
+        {
+            if (this != &other)
+            {
+                close();                          // 先释放自己原有的句柄
+                socket_ = other.socket_;
+                other.socket_ = INVALID_SOCKET;
+            }
+            return *this;
+        }
 
         // 借用底层句柄调用 Winsock API，所有权仍保留在 SocketHandle 中。
         [[nodiscard]] SOCKET get() const noexcept
@@ -95,7 +113,27 @@ namespace
         }
 
     private:
+        void close() noexcept
+        {
+            if (socket_ != INVALID_SOCKET)
+            {
+                closesocket(socket_);
+                socket_ = INVALID_SOCKET;
+            }
+        }
+
         SOCKET socket_;
+    };
+
+    // 客户端连接结构体
+    struct ClientSession
+    {
+        SocketHandle socket;
+        StreamParser parser;
+        SessionState state{SessionState::AwaitHello};
+        std::array<char, kReceiveBufferSize> receive_buffer{};
+        std::vector<std::uint8_t> send_queue;
+        bool close_after_flush{false};                // 协议要求关闭时先冲刷
     };
 
     enum class FrameAction
@@ -415,74 +453,118 @@ bool TcpServer::run()
 
     std::cout << "Server is listening on 127.0.0.1:" << port_ << "...\n";
 
-    // 阶段 5：阻塞等待一个客户端。
-    // accept() 返回专用于当前会话的新 Socket；监听 Socket 只负责接受连接，
-    // 不参与该客户端的数据收发。client_socket 后声明，所以离开作用域时先关闭。
-    SocketHandle client_socket(accept(listen_socket.get(), nullptr, nullptr));
-    if (!client_socket.valid())
-    {
-        report_winsock_error("accept");
-        return false;
-    }
-
-    // 当前服务器状态
-    SessionState session_state{SessionState::AwaitHello};
-
-    std::cout << "A client connected\n";
-
-    // 阶段 6：为当前连接建立独立接收状态。
-    // 解析器内部可能保存半个 magic、帧头或 payload，缓存只能属于这一条 TCP 流；
-    // 连接结束时销毁解析器，避免残留字节污染未来连接。
-    StreamParser parser;
-    std::array<char, kReceiveBufferSize> receive_buffer{};
+    // 所有活跃连接
+    std::vector<ClientSession> clients;
 
     while (true)
     {
-        // recv() 阻塞到至少一个字节到达、对端正常关闭，或出现 Socket 错误。
-        // 返回正数是本次实际字节数；不代表一个完整协议帧，也不保留 send() 边界。
-        const int bytes_read = recv(
-            client_socket.get(),
-            receive_buffer.data(),
-            static_cast<int>(receive_buffer.size()),
-            0);
+        // 构造本次要监听的 fd 集合
+        fd_set readfds{};
+        // 完全清空传入的 fd_set 集合，将其内部表示 Socket 的标志位全部重置为 0。
+        FD_ZERO(&readfds);
+        // 将特定的 Socket 句柄（这里是 listen_socket.get()）注册/添加进 readfds 这个集合中。
+        // 如果这个 listen_socket 有动静（对于监听 Socket 而言，“可读”通常意味着有新的客户端发起了 TCP 连接等待被 accept），请唤醒程序来处理。
+        FD_SET(listen_socket.get(), &readfds);
 
-        if (bytes_read == 0)
+        for (const auto& client : clients)
         {
-            // TCP 有序关闭：对端已经完成发送。这不是 Winsock 错误。
-            std::cout << "Client disconnected normally\n";
-            return true;
+            FD_SET(client.socket.get(), &readfds);
         }
-        if (bytes_read == SOCKET_ERROR)
+
+        // 阻塞等待，直到任意一个 fd 就绪
+        //    Windows: 第一个参数忽略，传 0
+        //    timeout 传 nullptr 表示永久等待
+        // readfds 传给 select 时是"所有可读集合"（你关心的全集），select 返回后变成"就绪集合"（实际可读的子集）。
+        const int ready = select(0, &readfds, nullptr, nullptr, nullptr);
+        if (ready == SOCKET_ERROR)
         {
-            // 只有 SOCKET_ERROR 分支才读取 WSAGetLastError()。
-            report_winsock_error("recv");
+            report_winsock_error("select");
             return false;
         }
+        // ready == 0 只可能发生在 timeout != nullptr 时，这里不会出现
 
-        // recv() 写入 char 缓冲区，而协议层使用 uint8_t。memcpy 按原始字节复制，
-        // 不会受到实现中 char 是否为有符号类型的影响。
-        std::vector<std::uint8_t> chunk(static_cast<std::size_t>(bytes_read));
-        std::memcpy(chunk.data(), receive_buffer.data(), chunk.size());
-
-        // 阶段 7：恢复协议帧。一次 feed() 可能返回 0 帧、1 帧或多帧；半包会
-        // 保留在 parser 内部，粘包则在本次调用中拆成多个 Frame。
-        const std::vector<Frame> frames = parser.feed(chunk);
-        for (const Frame& frame : frames)
+        // FD_ISSET 检查某个特定的 Socket 句柄是否被包含在给定的集合（fd_set）中
+        // 通常在 select() 函数调用返回之后使用。
+        if (FD_ISSET(listen_socket.get(), &readfds))
         {
-            std::cout << "Received complete frame CMD: "
-                      << static_cast<int>(frame.command) << '\n';
-
-            // 阶段 8：逐帧执行业务响应。发送失败与协议要求关闭必须立即终止
-            // 当前批次，不能继续处理同一 recv() 中排在后面的 Frame。
-            const FrameAction action = process_frame(client_socket.get(), frame, session_state);
-            if (action == FrameAction::FatalError)
+            SOCKET raw = accept(listen_socket.get(), nullptr, nullptr);
+            if (raw == INVALID_SOCKET)
             {
-                return false;
+                report_winsock_error("accept");
+                // 单个 accept 失败不影响已有连接，继续循环
             }
-            if (action == FrameAction::CloseConnection)
+            else
             {
-                std::cout << "Closing client connection as required by the protocol\n";
-                return true;
+                ClientSession cs;
+                cs.socket = SocketHandle(raw);        // 走移动赋值
+                clients.push_back(std::move(cs));
+                std::cout << "A client connected\n";
+            }
+        }
+
+        // 遍历所有客户端，处理就绪的
+        for (auto it = clients.begin(); it != clients.end();)
+        {
+            if (!FD_ISSET(it->socket.get(), &readfds))
+            {
+                // 本客户端本轮无数据
+                ++it;
+                continue;
+            }
+            // 是否需要移除该客户端
+            bool drop = false;
+            const int bytes_read = recv(it->socket.get(),it->receive_buffer.data(),
+                    static_cast<int>(it->receive_buffer.size()),0);
+
+            if (bytes_read == 0)
+            {
+                std::cout << "Client disconnected normally\n";
+                drop = true;
+            }
+            else if (bytes_read == SOCKET_ERROR)
+            {
+                report_winsock_error("recv");
+                // 单客户端错误不影响其他客户端
+                drop = true;
+            }
+            else
+            {
+                // recv() 写入 char 缓冲区，而协议层使用 uint8_t。memcpy 按原始字节复制，
+                // 不会受到实现中 char 是否为有符号类型的影响。
+                std::vector<std::uint8_t> chunk(static_cast<std::size_t>(bytes_read));
+                std::memcpy(chunk.data(), it->receive_buffer.data(), chunk.size());
+
+                // 阶段 7：恢复协议帧。一次 feed() 可能返回 0 帧、1 帧或多帧；半包会
+                // 保留在 parser 内部，粘包则在本次调用中拆成多个 Frame。
+                const std::vector<Frame> frames = it->parser.feed(chunk);
+                for (const Frame& frame : frames)
+                {
+                    std::cout << "Received complete frame CMD: "
+                              << static_cast<int>(frame.command) << '\n';
+
+                    // 阶段 8：逐帧执行业务响应。发送失败与协议要求关闭必须立即终止
+                    // 当前批次，不能继续处理同一 recv() 中排在后面的 Frame。
+                    const FrameAction action = process_frame(it->socket.get(), frame, it->state);
+                    if (action == FrameAction::FatalError)
+                    {
+                        return false;
+                    }
+                    if (action == FrameAction::CloseConnection)
+                    {
+                        std::cout << "Closing client connection as required by the protocol\n";
+                        return true;
+                    }
+                }
+            }
+
+            if (drop)
+            {
+                // erase 返回下一个迭代器
+                it = clients.erase(it);
+            }
+            else
+            {
+                ++it;
             }
         }
     }
