@@ -2,7 +2,6 @@
 #define VIRTUALBENTH_WINSOCKRUNTIME_H
 
 #include <cstdint>
-#include <vector>
 
 // 本文件只暴露模拟器启动所需的最小接口。
 // Winsock、SOCKET、sockaddr_in 等 Windows 细节全部留在 .cpp 中，避免调用方
@@ -39,7 +38,7 @@ class TcpServer final
 {
 public:
     // port 使用主机字节序保存；填充 sockaddr_in 时再通过 htons() 转为网络字节序。
-    explicit TcpServer(std::uint16_t port = 12345, uint32_t sample_rate = 10, uint8_t chan_mask = 1) noexcept;
+    explicit TcpServer(std::uint16_t port = 12345) noexcept;
 
     // 依次完成 socket → bind → listen → accept → select → recv/process/send。
     // 返回 true：客户端正常断开，或服务端已按协议发送错误并主动关闭连接。
@@ -50,10 +49,6 @@ public:
 private:
     // 保持主机字节序，便于日志输出和构造函数参数传递。
     std::uint16_t port_;
-    // START命令的 采样率 和 通道 和 缓存
-    std::uint32_t sample_rate_;
-    std::uint8_t chan_mask_;
-    std::uint32_t seqs_[8];
 };
 
 #endif // VIRTUALBENTH_WINSOCKRUNTIME_H

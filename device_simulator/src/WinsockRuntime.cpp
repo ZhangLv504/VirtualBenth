@@ -31,6 +31,29 @@ namespace
         Idle,
     };
 
+    // 当前 TCP 连接中一次采集会话的配置与逐通道序号。
+    // START 成功后整体提交；STOP 成功时清空；连接结束时随 run() 的局部作用域销毁。
+    struct SamplingContext
+    {
+        std::uint32_t sample_rate{0};
+        std::uint8_t channel_mask{0};
+        std::array<std::uint32_t, 8> sequence_by_channel{};
+
+        void start(std::uint32_t new_sample_rate, std::uint8_t new_channel_mask) noexcept
+        {
+            sample_rate = new_sample_rate;
+            channel_mask = new_channel_mask;
+            sequence_by_channel.fill(0);
+        }
+
+        void reset() noexcept
+        {
+            sample_rate = 0;
+            channel_mask = 0;
+            sequence_by_channel.fill(0);
+        }
+    };
+
     // “ACK 成功”“READY 状态”“错误类型”，而不是散落难以审查的裸十六进制数。
     // 0x00 表示 ACK 处理结果为 OK
     constexpr std::uint8_t kAckOk = 0x00;
@@ -208,7 +231,11 @@ namespace
 
     // 对 StreamParser 已验证过结构和 CRC 的完整帧执行业务语义检查。
     // 返回 FrameAction 而不是在此直接关闭 Socket，让连接循环统一决定生命周期。
-    [[nodiscard]] FrameAction process_frame(SOCKET socket, const Frame& frame, SessionState& session_state)
+    [[nodiscard]] FrameAction process_frame(
+        SOCKET socket,
+        const Frame& frame,
+        SessionState& session_state,
+        SamplingContext& sampling_context)
     {
         // decode 会保留 CRC 正确帧的原始版本；版本不匹配是业务错误，而非流同步错误。
         if (frame.version != kProtocolVersion)
@@ -280,6 +307,9 @@ namespace
 
             if (send_success(socket, frame.command, kStatusRunning))
             {
+                // 只有 ACK 与 RUNNING STATUS 都发送成功后，才同时提交状态与采样配置。
+                // 再次 START 会从新的采集会话开始，因此所有通道序号重新归零。
+                sampling_context.start(sample_rate, channel_mask);
                 session_state = SessionState::Running;
                 return FrameAction::KeepConnection;
             }
@@ -304,6 +334,8 @@ namespace
 
             if (send_success(socket, frame.command, kStatusIdle))
             {
+                // STOP 成功后不再保留上一采集会话的配置与序号。
+                sampling_context.reset();
                 session_state = SessionState::Idle;
                 return FrameAction::KeepConnection;
             }
@@ -372,10 +404,8 @@ WinsockRuntime::~WinsockRuntime() noexcept
     WSACleanup();
 }
 
-TcpServer::TcpServer(std::uint16_t port, uint32_t sample_rate, uint8_t chan_mask) noexcept
+TcpServer::TcpServer(std::uint16_t port) noexcept
     : port_(port)
-    , sample_rate_(sample_rate)
-    , chan_mask_(chan_mask)
 {
 }
 
@@ -430,6 +460,7 @@ bool TcpServer::run()
 
     // 当前服务器状态
     SessionState session_state{SessionState::AwaitHello};
+    SamplingContext sampling_context{};
 
     std::cout << "A client connected\n";
 
@@ -460,70 +491,11 @@ bool TcpServer::run()
             const auto now = std::chrono::steady_clock::now();
             if (now >= next_data_deadline)
             {
-                // 当前仅保留 tick 边界。正式实现时应在推进截止时间前生成并发送一批 DATA。
-                // 跳过已错过的空 tick，避免事件循环高速追赶空任务。
+                // 当前只保留 tick 边界，不生成或发送 DATA。跳过已经错过的空 tick，
+                // 避免事件循环为了追赶历史截止点而高速空转。
                 do
                 {
                     next_data_deadline += kDataTickInterval;
-
-                    // 获取当前时间的 Unix Epoch 微秒数
-                    const auto ts_now = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count();
-                    const uint64_t ts = static_cast<uint64_t>(ts_now);
-
-                    // 根据采用率和 20ms 的 tick 计算本次需要发送的样本数
-                    // 例如：10000Hz * 0.02s = 200 个样本
-                    const uint16_t cnt = static_cast<uint16_t>((sample_rate_ * kDataTickInterval.count()) / 1000);
-
-                    // START 命令传下来的 chan_mask 是一个 8 位的位掩码（uint8，bit0代表通道0，bit1代表通道1...）
-                    // 为了把这个“掩码”拆解成单独的通道发出去，代码需要遍历所有可能的 8 个位（通道 0 到 7）。
-                    for (uint8_t chan_id = 0; chan_id < 8; ++chan_id)
-                    {
-                        if ((chan_mask_ & (1 << chan_id)) != 0)
-                        {
-                            Frame data_frame;
-                            data_frame.command = Command::Data;
-                            // 预留 payload 容量：15 字节固定字段 + (4 字节 * 样本数)
-                            data_frame.payload.reserve(15 + 4 * cnt);
-                            // 通道号
-                            data_frame.payload.push_back(chan_id);
-                            // 序列号
-                            data_frame.payload.push_back(static_cast<uint8_t>(seqs_[chan_id] & 0xFF));
-                            data_frame.payload.push_back(static_cast<uint8_t>((seqs_[chan_id] >> 8) & 0xFF));
-                            data_frame.payload.push_back(static_cast<uint8_t>((seqs_[chan_id] >> 16) & 0xFF));
-                            data_frame.payload.push_back(static_cast<uint8_t>((seqs_[chan_id] >> 24) & 0xFF));
-                            // 本批样本起始绝对时间，Unix Epoch 微秒（UTC）
-                            for (int i = 0; i < 8; ++i)
-                            {
-                                data_frame.payload.push_back(static_cast<uint8_t>(ts >> (i * 8) & 0xFF));
-                            }
-                            // 本帧样本个数
-                            data_frame.payload.push_back(static_cast<uint8_t>(cnt & 0xFF));
-                            data_frame.payload.push_back(static_cast<uint8_t>((cnt >> 8) & 0xFF));
-                            // 采样数据 (4B * cnt) float32 小端序
-                            for (int i = 0; i < cnt; ++i)
-                            {
-                                // 构造模拟数据
-                                float sample = 1.0f;
-                                uint32_t sample_bits;
-                                std::memcpy(&sample_bits, &sample, sizeof(sample));
-                                data_frame.payload.push_back(static_cast<uint8_t>(sample_bits & 0xFF));
-                                data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 8) & 0xFF));
-                                data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 16) & 0xFF));
-                                data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 24) & 0xFF));
-
-                            }
-                            // 调用 send_frame，由它完成打包与 TCP 发送
-                            if (!send_frame(client_socket.get(), data_frame))
-                            {
-                                return false;
-                            }
-                            if (seqs_[chan_id]++ > UINT32_MAX)
-                            {
-                                seqs_[chan_id] %= UINT32_MAX;
-                            }
-                        }
-                    }
                 }
                 while (next_data_deadline <= now);
                 continue;
@@ -592,7 +564,7 @@ bool TcpServer::run()
 
             const SessionState state_before = session_state;
             const FrameAction action = process_frame(
-                client_socket.get(), frame, session_state
+                client_socket.get(), frame, session_state, sampling_context
                 );
             if (action == FrameAction::FatalError)
             {
@@ -609,9 +581,6 @@ bool TcpServer::run()
             if (state_before != SessionState::Running &&
                 session_state == SessionState::Running)
             {
-                sample_rate_ = static_cast<std::uint32_t>(frame.payload.at(0)) | static_cast<std::uint32_t>(frame.payload.at(1) << 8) |
-                    static_cast<std::uint32_t>(frame.payload.at(2) << 16) | static_cast<std::uint32_t>(frame.payload.at(3) << 24);
-                chan_mask_ = static_cast<std::uint8_t>(frame.payload.at(4));
                 next_data_deadline = std::chrono::steady_clock::now() + kDataTickInterval;
             }
 

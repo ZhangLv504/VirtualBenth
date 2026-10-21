@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：已验收的 HELLO/START/STOP 与空 DATA tick 骨架基线仍成立。用户工作区随后提前加入真实 DATA 生成，但本轮静态审查发现成功 START 后越界读取 payload、正常 `select()` 超时不发送 DATA、序号模型与长度边界不符合协议等阻断项；该新增实现未通过审查，未构建、测试或联调。
-- 当前唯一目标：先撤回本轮提前加入的 DATA 生成，只实现单连接采样上下文：成功 START 后保存 `sample_rate`/`chan_mask`、按通道初始化独立 `seq`，并明确 STOP、断线和再次 START 的重置规则。
+- 当前状态：已验收的 HELLO/START/STOP 与空 DATA tick 骨架基线仍成立。用户提交 `1baabc1` 仍提前包含真实 DATA 生成；按用户授权，工作区已撤回该发送逻辑并实现连接局部 `SamplingContext`：成功 START 后提交采样率/通道掩码并清零 8 个独立序号，STOP 成功后清空，断线时随局部作用域销毁。静态复审和 `git diff --check` 通过，尚未构建、测试或联调。
+- 当前唯一目标：取得许可后在默认 MSVC 2022 + RelWithDebInfo 环境构建 `device_simulator` 与 `protocol_tests` 并运行协议回归，确认采样上下文改造未破坏控制状态机。
 
 ## 默认构建环境
 
@@ -79,21 +79,21 @@
 
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
 - 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建和协议回归；当前 tick 只推进截止时间，不生成或发送 DATA，尚未完成真实 TCP 联调。
+- 工作区新增连接局部 `SamplingContext`：仅在合法 START 的 ACK+RUNNING 均发送成功后提交 `sample_rate`、`channel_mask` 并将 8 个通道序号清零；STOP 成功时清空，断线时随 `run()` 局部作用域销毁。该修改已通过静态复审，尚未构建、测试或联调。
 
 ## 待处理/已知问题
 
 - 旧 VS2019 + Ninja 构建树在助手环境持续报 MSVC `C1902`，原因指向 14.29 PDB 工具组件版本不一致；该问题保留为历史环境记录，但 VS2019 已不再是当前默认门槛，不阻断后续主线。
 - 已验收的 `ed18169` 基线是单客户端、单次 `accept()`；`d68a768` 已改成多客户端循环，但该扩展不属于当前阶段且存在下列静态阻断项，不能视为已验收能力。
 - `send_all()` 的部分发送分支和各 Winsock 失败清理路径已有代码审查与构建证据，但尚未通过故障注入强制触发。
-- 当前 20ms DATA tick 只是事件循环骨架，不代表已经实现协议 DATA；尚未保存 START 的采样率/通道掩码，也未生成 `chanId/seq/ts/cnt/samples`、UTC 时间戳或波形数据。
+- 当前 20ms DATA tick 只是事件循环骨架，不代表已经实现协议 DATA；START 的采样率/通道掩码及独立序号状态已在工作区保存，但尚未生成 `chanId/seq/ts/cnt/samples`、UTC 时间戳或波形数据。
 - 单客户端仍使用阻塞式 `send_all()`；对当前小响应和单连接骨架可以保留，但正式连续 DATA 推流前需要评估慢接收端导致 STOP 处理延迟的边界，不能把本轮骨架外推为发送背压已解决。
 - `Doc/项目规划V3.1.md` 第 2.4 节仍把 DATA 的 `ts` 描述为“模拟器启动后的单调时间”，与权威 `Doc/协议文档.md` 的“UTC Unix Epoch 微秒”冲突。按仓库优先级，线上 DATA 必须使用 UTC Epoch；`steady_clock` 仅用于本机节拍和超时。
-- 工作区新增 DATA 代码尚未通过审查：成功 START 后访问不存在的 payload 索引 6～9；正常 `select()` 超时路径只推进截止时间而不发送；单个 `seq_` 不能表达每通道独立计数且再次 START 不重置；任意 `sample_rate` 直接窄化为 `uint16_t cnt`，没有保证 `cnt <= 1020`；逾期时循环补发所有批次并调用阻塞式 `send_all()`，可能长期推迟 STOP。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-10-20 核对时本地 `main`、`origin/main` 与 `HEAD d68a768` 一致；按用户授权直接修改后的工作区已恢复单客户端并加入 DATA tick 骨架，涉及 `WinsockRuntime.cpp/.h`。审查过程中检测到用户侧 `Doc/VirtualBenth.drawio` 及 draw.io 临时/备份文件，均未触碰。
+- 2026-10-21 核对时本地 `HEAD 1baabc1` 比 `origin/main 1deb723` 超前 1 个提交；按用户授权修改后的工作区已撤回提前加入的 DATA 发送并实现连接局部采样上下文，涉及 `WinsockRuntime.cpp/.h`。本轮未提交、未推送。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -142,12 +142,13 @@
 33. 2026-10-21 经用户以“下一步”授权执行验收：重新核对默认 `build` 缓存后，使用 VS2022、x64、MSVC 14.38、C++17 和 `RelWithDebInfo` 构建 `device_simulator` 与 `protocol_tests`，两个目标均为 0 警告、0 错误；随后 CTest 1/1、Catch2 36 个用例和 268 个断言全部通过。DATA tick 骨架取得构建与协议回归证据，下一门槛为同一真实 TCP 连接的 HELLO→START→STOP 联调。
 34. 2026-10-21 审查用户提供的连续 NetAssist 日志：HELLO、START、STOP 的六个响应帧均逐字节符合协议；START 与 STOP 相隔约 15.1 秒，STOP 仍在日志同一毫秒收到 ACK+IDLE，证明 Running 状态反复 tick 后控制通路保持响应。DATA tick 骨架完成构建、回归与真实 TCP 联调验收。对照下一阶段资料时发现规划文档的 DATA 时间戳旧描述与协议冲突，明确以后者的 UTC Epoch 定义为准。
 35. 2026-10-21 静态审查用户新增的 START 配置与 DATA 发送代码：实现范围超出当前“只保存采样上下文”小步，并存在多个阻断项。最直接的问题是 START payload 仅有索引 0～4，代码却在已发送 ACK+RUNNING 后读取索引 6～9，会抛出 `std::out_of_range` 并关闭连接；正常定时到期走 `ready == 0` 分支时又完全不发送 DATA。另有单一序号、重启不复位、样本数溢出/超长、逾期追赶阻塞控制通路及头文件契约过时等问题。本轮审查不通过，未运行构建、测试或联调。
+36. 2026-10-21 用户提交 `1baabc1` 后要求“还有问题直接修改”：最新代码已修正 START 索引并改为 8 个序号，但仍提前生成 DATA，序号数组未初始化，且 `seqs_[chan_id]++ > UINT32_MAX` 对 `uint32_t` 永远不成立。按授权直接撤回全部 DATA 构造/发送及公开构造参数，新增连接局部 `SamplingContext`；START 成功后提交配置并清零逐通道序号，STOP 成功后清空，断线自然销毁。静态复审与 `git diff --check` 通过，本轮未运行构建、测试或联调。
 
 ## 下一步流程
 
-1. 删除本轮提前加入的 DATA 生成与发送循环，恢复已经验收的空 tick 行为；不要把采样配置作为 `TcpServer` 构造参数暴露。
-2. 增加连接局部的采样上下文，只在 START 参数合法且 ACK+RUNNING 发送成功后提交 `sample_rate`、`chan_mask`，并将 8 个通道的独立序号初始化为 0；STOP 和断线清理上下文，再次 START 建立新上下文。
-3. 静态审查通过并经许可完成默认环境构建回归后，再单独设计 `cnt <= 1020`、低采样率余数累计、时间戳和发送背压，不在本小步发送 DATA。
+1. 经用户许可重新核对 `build/CMakeCache.txt`，使用 `--config RelWithDebInfo` 构建 `device_simulator` 和 `protocol_tests`。
+2. 运行 CTest 与 Catch2 协议回归；通过后再用同一连接复核 HELLO→START→STOP→START，确认状态机无回归。
+3. 本小步验收后，再单独设计 `cnt <= 1020`、低采样率余数累计、时间戳和发送背压，不提前发送 DATA。
 
 ## 暂不开始
 
