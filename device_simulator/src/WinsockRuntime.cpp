@@ -376,7 +376,6 @@ TcpServer::TcpServer(std::uint16_t port, uint32_t sample_rate, uint8_t chan_mask
     : port_(port)
     , sample_rate_(sample_rate)
     , chan_mask_(chan_mask)
-    , seq_(0)
 {
 }
 
@@ -489,10 +488,10 @@ bool TcpServer::run()
                             // 通道号
                             data_frame.payload.push_back(chan_id);
                             // 序列号
-                            data_frame.payload.push_back(static_cast<uint8_t>(seq_ & 0xFF));
-                            data_frame.payload.push_back(static_cast<uint8_t>((seq_ >> 8) & 0xFF));
-                            data_frame.payload.push_back(static_cast<uint8_t>((seq_ >> 16) & 0xFF));
-                            data_frame.payload.push_back(static_cast<uint8_t>((seq_ >> 24) & 0xFF));
+                            data_frame.payload.push_back(static_cast<uint8_t>(seqs_[chan_id] & 0xFF));
+                            data_frame.payload.push_back(static_cast<uint8_t>((seqs_[chan_id] >> 8) & 0xFF));
+                            data_frame.payload.push_back(static_cast<uint8_t>((seqs_[chan_id] >> 16) & 0xFF));
+                            data_frame.payload.push_back(static_cast<uint8_t>((seqs_[chan_id] >> 24) & 0xFF));
                             // 本批样本起始绝对时间，Unix Epoch 微秒（UTC）
                             for (int i = 0; i < 8; ++i)
                             {
@@ -519,9 +518,12 @@ bool TcpServer::run()
                             {
                                 return false;
                             }
+                            if (seqs_[chan_id]++ > UINT32_MAX)
+                            {
+                                seqs_[chan_id] %= UINT32_MAX;
+                            }
                         }
                     }
-                    seq_++;
                 }
                 while (next_data_deadline <= now);
                 continue;
@@ -607,9 +609,9 @@ bool TcpServer::run()
             if (state_before != SessionState::Running &&
                 session_state == SessionState::Running)
             {
-                sample_rate_ = static_cast<std::uint32_t>(frame.payload.at(6)) | static_cast<std::uint32_t>(frame.payload.at(6) << 8) |
-                    static_cast<std::uint32_t>(frame.payload.at(7) << 16) | static_cast<std::uint32_t>(frame.payload.at(8) << 24);
-                chan_mask_ = static_cast<std::uint8_t>(frame.payload.at(9));
+                sample_rate_ = static_cast<std::uint32_t>(frame.payload.at(0)) | static_cast<std::uint32_t>(frame.payload.at(1) << 8) |
+                    static_cast<std::uint32_t>(frame.payload.at(2) << 16) | static_cast<std::uint32_t>(frame.payload.at(3) << 24);
+                chan_mask_ = static_cast<std::uint8_t>(frame.payload.at(4));
                 next_data_deadline = std::chrono::steady_clock::now() + kDataTickInterval;
             }
 

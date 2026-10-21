@@ -51,9 +51,9 @@ private:
     // 保持主机字节序，便于日志输出和构造函数参数传递。
     std::uint16_t port_;
     // START命令的 采样率 和 通道 和 缓存
-    uint32_t sample_rate_;
-    uint8_t chan_mask_;
-    uint32_t seq_;
+    std::uint32_t sample_rate_;
+    std::uint8_t chan_mask_;
+    std::uint32_t seqs_[8];
 };
 
 #endif // VIRTUALBENTH_WINSOCKRUNTIME_H
