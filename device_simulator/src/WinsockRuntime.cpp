@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cstddef>
 #include <cstring>
@@ -75,30 +76,12 @@ namespace
             }
         }
 
-        // 禁止拷贝：句柄只有一个所有者，复制会导致 double-close。
+        // 当前最小实现不需要转移所有权。完全禁止复制/移动可确保始终只有一个
+        // 对象负责关闭句柄，避免 double-close 或悬空句柄。
         SocketHandle(const SocketHandle&) = delete;
         SocketHandle& operator=(const SocketHandle&) = delete;
-
-        // 允许移动：转移所有权，源对象置为 INVALID_SOCKET，
-        // 这样源对象析构时不会关闭已转移出去的句柄。
-        // noexcept 很关键：vector 扩容时会优先用它（否则异常安全要回退到拷贝，
-        // 而拷贝已删除，会导致 vector 扩容失败/编译报错）
-        SocketHandle(SocketHandle&& other) noexcept
-            : socket_(other.socket_)
-        {
-            other.socket_ = INVALID_SOCKET;
-        }
-
-        SocketHandle& operator=(SocketHandle&& other) noexcept
-        {
-            if (this != &other)
-            {
-                close();                          // 先释放自己原有的句柄
-                socket_ = other.socket_;
-                other.socket_ = INVALID_SOCKET;
-            }
-            return *this;
-        }
+        SocketHandle(SocketHandle&&) = delete;
+        SocketHandle& operator=(SocketHandle&&) = delete;
 
         // 借用底层句柄调用 Winsock API，所有权仍保留在 SocketHandle 中。
         [[nodiscard]] SOCKET get() const noexcept
@@ -113,27 +96,7 @@ namespace
         }
 
     private:
-        void close() noexcept
-        {
-            if (socket_ != INVALID_SOCKET)
-            {
-                closesocket(socket_);
-                socket_ = INVALID_SOCKET;
-            }
-        }
-
         SOCKET socket_;
-    };
-
-    // 客户端连接结构体
-    struct ClientSession
-    {
-        SocketHandle socket;
-        StreamParser parser;
-        SessionState state{SessionState::AwaitHello};
-        std::array<char, kReceiveBufferSize> receive_buffer{};
-        std::vector<std::uint8_t> send_queue;
-        bool close_after_flush{false};                // 协议要求关闭时先冲刷
     };
 
     enum class FrameAction
@@ -409,8 +372,11 @@ WinsockRuntime::~WinsockRuntime() noexcept
     WSACleanup();
 }
 
-TcpServer::TcpServer(std::uint16_t port) noexcept
+TcpServer::TcpServer(std::uint16_t port, uint32_t sample_rate, uint8_t chan_mask) noexcept
     : port_(port)
+    , sample_rate_(sample_rate)
+    , chan_mask_(chan_mask)
+    , seq_(0)
 {
 }
 
@@ -453,119 +419,202 @@ bool TcpServer::run()
 
     std::cout << "Server is listening on 127.0.0.1:" << port_ << "...\n";
 
-    // 所有活跃连接
-    std::vector<ClientSession> clients;
+    // 阶段 5：阻塞等待一个客户端。
+    // accept() 返回专用于当前会话的新 Socket；监听 Socket 只负责接受连接，
+    // 不参与该客户端的数据收发。client_socket 后声明，所以离开作用域时先关闭。
+    SocketHandle client_socket(accept(listen_socket.get(), nullptr, nullptr));
+    if (!client_socket.valid())
+    {
+        report_winsock_error("accept");
+        return false;
+    }
+
+    // 当前服务器状态
+    SessionState session_state{SessionState::AwaitHello};
+
+    std::cout << "A client connected\n";
+
+    // 阶段 6：为当前连接建立独立接收状态。
+    // 解析器内部可能保存半个 magic、帧头或 payload，缓存只能属于这一条 TCP 流；
+    // 连接结束时销毁解析器，避免残留字节污染未来连接。
+    StreamParser parser;
+    std::array<char, kReceiveBufferSize> receive_buffer{};
+
+    // 当前小步只搭建 DATA 节拍唤醒骨架，不生成真实 DATA。20ms 是临时周期；
+    // 后续会根据 START.sample_rate 与每帧 cnt 计算真实截止时间。
+    constexpr std::chrono::milliseconds kDataTickInterval{20};
+    std::chrono::steady_clock::time_point next_data_deadline{};
 
     while (true)
     {
-        // 构造本次要监听的 fd 集合
+        // select() 会改写传入集合，因此每轮都重新构造当前客户端的读集合。
         fd_set readfds{};
-        // 完全清空传入的 fd_set 集合，将其内部表示 Socket 的标志位全部重置为 0。
         FD_ZERO(&readfds);
-        // 将特定的 Socket 句柄（这里是 listen_socket.get()）注册/添加进 readfds 这个集合中。
-        // 如果这个 listen_socket 有动静（对于监听 Socket 而言，“可读”通常意味着有新的客户端发起了 TCP 连接等待被 accept），请唤醒程序来处理。
-        FD_SET(listen_socket.get(), &readfds);
+        FD_SET(client_socket.get(), &readfds);
 
-        for (const auto& client : clients)
+        // 非 Running 状态没有 DATA 截止时间，可以一直等控制字节；
+        // Running 状态则只等到最近的单调时钟截止点。timeval 必须活到 select() 返回。
+        timeval timeout{};
+        timeval* timeout_ptr = nullptr;
+        if (session_state == SessionState::Running)
         {
-            FD_SET(client.socket.get(), &readfds);
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= next_data_deadline)
+            {
+                // 当前仅保留 tick 边界。正式实现时应在推进截止时间前生成并发送一批 DATA。
+                // 跳过已错过的空 tick，避免事件循环高速追赶空任务。
+                do
+                {
+                    next_data_deadline += kDataTickInterval;
+
+                    // 获取当前时间的 Unix Epoch 微秒数
+                    const auto ts_now = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    const uint64_t ts = static_cast<uint64_t>(ts_now);
+
+                    // 根据采用率和 20ms 的 tick 计算本次需要发送的样本数
+                    // 例如：10000Hz * 0.02s = 200 个样本
+                    const uint16_t cnt = static_cast<uint16_t>((sample_rate_ * kDataTickInterval.count()) / 1000);
+
+                    // START 命令传下来的 chan_mask 是一个 8 位的位掩码（uint8，bit0代表通道0，bit1代表通道1...）
+                    // 为了把这个“掩码”拆解成单独的通道发出去，代码需要遍历所有可能的 8 个位（通道 0 到 7）。
+                    for (uint8_t chan_id = 0; chan_id < 8; ++chan_id)
+                    {
+                        if ((chan_mask_ & (1 << chan_id)) != 0)
+                        {
+                            Frame data_frame;
+                            data_frame.command = Command::Data;
+                            // 预留 payload 容量：15 字节固定字段 + (4 字节 * 样本数)
+                            data_frame.payload.reserve(15 + 4 * cnt);
+                            // 通道号
+                            data_frame.payload.push_back(chan_id);
+                            // 序列号
+                            data_frame.payload.push_back(static_cast<uint8_t>(seq_ & 0xFF));
+                            data_frame.payload.push_back(static_cast<uint8_t>((seq_ >> 8) & 0xFF));
+                            data_frame.payload.push_back(static_cast<uint8_t>((seq_ >> 16) & 0xFF));
+                            data_frame.payload.push_back(static_cast<uint8_t>((seq_ >> 24) & 0xFF));
+                            // 本批样本起始绝对时间，Unix Epoch 微秒（UTC）
+                            for (int i = 0; i < 8; ++i)
+                            {
+                                data_frame.payload.push_back(static_cast<uint8_t>(ts >> (i * 8) & 0xFF));
+                            }
+                            // 本帧样本个数
+                            data_frame.payload.push_back(static_cast<uint8_t>(cnt & 0xFF));
+                            data_frame.payload.push_back(static_cast<uint8_t>((cnt >> 8) & 0xFF));
+                            // 采样数据 (4B * cnt) float32 小端序
+                            for (int i = 0; i < cnt; ++i)
+                            {
+                                // 构造模拟数据
+                                float sample = 1.0f;
+                                uint32_t sample_bits;
+                                std::memcpy(&sample_bits, &sample, sizeof(sample));
+                                data_frame.payload.push_back(static_cast<uint8_t>(sample_bits & 0xFF));
+                                data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 8) & 0xFF));
+                                data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 16) & 0xFF));
+                                data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 24) & 0xFF));
+
+                            }
+                            // 调用 send_frame，由它完成打包与 TCP 发送
+                            if (!send_frame(client_socket.get(), data_frame))
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                    seq_++;
+                }
+                while (next_data_deadline <= now);
+                continue;
+            }
+
+            const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+                next_data_deadline - now);
+            timeout.tv_sec = static_cast<long>(remaining.count() / 1000000);
+            timeout.tv_usec = static_cast<long>(remaining.count() % 1000000);
+            timeout_ptr = &timeout;
         }
 
-        // 阻塞等待，直到任意一个 fd 就绪
-        //    Windows: 第一个参数忽略，传 0
-        //    timeout 传 nullptr 表示永久等待
-        // readfds 传给 select 时是"所有可读集合"（你关心的全集），select 返回后变成"就绪集合"（实际可读的子集）。
-        const int ready = select(0, &readfds, nullptr, nullptr, nullptr);
+        const int ready = select(0, &readfds, nullptr, nullptr, timeout_ptr);
         if (ready == SOCKET_ERROR)
         {
             report_winsock_error("select");
             return false;
         }
-        // ready == 0 只可能发生在 timeout != nullptr 时，这里不会出现
 
-        // FD_ISSET 检查某个特定的 Socket 句柄是否被包含在给定的集合（fd_set）中
-        // 通常在 select() 函数调用返回之后使用。
-        if (FD_ISSET(listen_socket.get(), &readfds))
+        if (ready == 0)
         {
-            SOCKET raw = accept(listen_socket.get(), nullptr, nullptr);
-            if (raw == INVALID_SOCKET)
+            // Running 的 DATA 截止时间到达。当前骨架不发送帧，只推进到下一个未来截止点；
+            // 正式 DATA 实现不得在 ACK(START)+RUNNING 之前进入这里。
+            const auto now = std::chrono::steady_clock::now();
+            do
             {
-                report_winsock_error("accept");
-                // 单个 accept 失败不影响已有连接，继续循环
+                next_data_deadline += kDataTickInterval;
             }
-            else
-            {
-                ClientSession cs;
-                cs.socket = SocketHandle(raw);        // 走移动赋值
-                clients.push_back(std::move(cs));
-                std::cout << "A client connected\n";
-            }
+            while (next_data_deadline <= now);
+            continue;
         }
 
-        // 遍历所有客户端，处理就绪的
-        for (auto it = clients.begin(); it != clients.end();)
+        if (!FD_ISSET(client_socket.get(), &readfds))
         {
-            if (!FD_ISSET(it->socket.get(), &readfds))
-            {
-                // 本客户端本轮无数据
-                ++it;
-                continue;
-            }
-            // 是否需要移除该客户端
-            bool drop = false;
-            const int bytes_read = recv(it->socket.get(),it->receive_buffer.data(),
-                    static_cast<int>(it->receive_buffer.size()),0);
+            // 当前集合只有一个客户端；防御性保留，避免未来扩展集合时在未就绪
+            // Socket 上调用阻塞 recv()。
+            continue;
+        }
 
-            if (bytes_read == 0)
-            {
-                std::cout << "Client disconnected normally\n";
-                drop = true;
-            }
-            else if (bytes_read == SOCKET_ERROR)
-            {
-                report_winsock_error("recv");
-                // 单客户端错误不影响其他客户端
-                drop = true;
-            }
-            else
-            {
-                // recv() 写入 char 缓冲区，而协议层使用 uint8_t。memcpy 按原始字节复制，
-                // 不会受到实现中 char 是否为有符号类型的影响。
-                std::vector<std::uint8_t> chunk(static_cast<std::size_t>(bytes_read));
-                std::memcpy(chunk.data(), it->receive_buffer.data(), chunk.size());
+        // select() 已确认当前 Socket 可读；recv() 仍需区分数据、正常关闭和错误。
+        const int bytes_read = recv(
+            client_socket.get(),
+            receive_buffer.data(),
+            static_cast<int>(receive_buffer.size()),
+            0);
 
-                // 阶段 7：恢复协议帧。一次 feed() 可能返回 0 帧、1 帧或多帧；半包会
-                // 保留在 parser 内部，粘包则在本次调用中拆成多个 Frame。
-                const std::vector<Frame> frames = it->parser.feed(chunk);
-                for (const Frame& frame : frames)
-                {
-                    std::cout << "Received complete frame CMD: "
-                              << static_cast<int>(frame.command) << '\n';
+        if (bytes_read == 0)
+        {
+            std::cout << "Client disconnected normally\n";
+            return true;
+        }
+        if (bytes_read == SOCKET_ERROR)
+        {
+            report_winsock_error("recv");
+            return false;
+        }
 
-                    // 阶段 8：逐帧执行业务响应。发送失败与协议要求关闭必须立即终止
-                    // 当前批次，不能继续处理同一 recv() 中排在后面的 Frame。
-                    const FrameAction action = process_frame(it->socket.get(), frame, it->state);
-                    if (action == FrameAction::FatalError)
-                    {
-                        return false;
-                    }
-                    if (action == FrameAction::CloseConnection)
-                    {
-                        std::cout << "Closing client connection as required by the protocol\n";
-                        return true;
-                    }
-                }
+        std::vector<std::uint8_t> chunk(static_cast<std::size_t>(bytes_read));
+        std::memcpy(chunk.data(), receive_buffer.data(), chunk.size());
+
+        const std::vector<Frame> frames = parser.feed(chunk);
+        for (const Frame& frame : frames)
+        {
+            std::cout << "Received complete frame CMD: "
+                      << static_cast<int>(frame.command) << '\n';
+
+            const SessionState state_before = session_state;
+            const FrameAction action = process_frame(
+                client_socket.get(), frame, session_state
+                );
+            if (action == FrameAction::FatalError)
+            {
+                return false;
+            }
+            if (action == FrameAction::CloseConnection)
+            {
+                std::cout << "Closing client connection as required by the protocol\n";
+                return true;
             }
 
-            if (drop)
+            // 只有成功 START 才会把状态从 Ready/Idle 改为 Running；此时 ACK 与
+            // STATUS 已发送成功，随后才能启动首个 DATA 截止时间。
+            if (state_before != SessionState::Running &&
+                session_state == SessionState::Running)
             {
-                // erase 返回下一个迭代器
-                it = clients.erase(it);
+                sample_rate_ = static_cast<std::uint32_t>(frame.payload.at(6)) | static_cast<std::uint32_t>(frame.payload.at(6) << 8) |
+                    static_cast<std::uint32_t>(frame.payload.at(7) << 16) | static_cast<std::uint32_t>(frame.payload.at(8) << 24);
+                chan_mask_ = static_cast<std::uint8_t>(frame.payload.at(9));
+                next_data_deadline = std::chrono::steady_clock::now() + kDataTickInterval;
             }
-            else
-            {
-                ++it;
-            }
+
+            // STOP 成功后状态已经离开 Running。旧截止点可以保留但不再参与
+            // select()；下一次 START 会重新建立新的采集节拍起点。
         }
     }
 }

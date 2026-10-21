@@ -1,14 +1,14 @@
 # VirtualBenth 项目进度
 
-> 最近核对：2026-10-19（Asia/Shanghai）
+> 最近核对：2026-10-21（Asia/Shanghai）
 > 用途：给当前与新会话提供动态交接。开始工作时仍须核对 Git、实际文件和最新测试输出。
 
 ## 当前阶段
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：提交 `e1f5180` 的最新状态机已通过静态复审、默认 MSVC 2022 + RelWithDebInfo 构建和协议回归；同一连接内的成功主路径、重复 HELLO/START/STOP、START 参数错误、STOP payload 错误，以及所有非致命错误后的连接和原状态保持均已通过 NetAssist 精确字节验收。
-- 当前唯一目标：进入 DATA 周期推流实现前的设计小步，对照权威协议冻结最小职责、时钟/节拍模型和验收边界；本轮先不直接编写核心推流代码。
+- 当前状态：已验收的 HELLO/START/STOP 与空 DATA tick 骨架基线仍成立。用户工作区随后提前加入真实 DATA 生成，但本轮静态审查发现成功 START 后越界读取 payload、正常 `select()` 超时不发送 DATA、序号模型与长度边界不符合协议等阻断项；该新增实现未通过审查，未构建、测试或联调。
+- 当前唯一目标：先撤回本轮提前加入的 DATA 生成，只实现单连接采样上下文：成功 START 后保存 `sample_rate`/`chan_mask`、按通道初始化独立 `seq`，并明确 STOP、断线和再次 START 的重置规则。
 
 ## 默认构建环境
 
@@ -69,23 +69,31 @@
 - 2026-10-18 13:56:33 用户发送未知命令 `0x55` 帧，服务端返回精确 ERROR(UNKNOWN_CMD) `A5 5A 01 7F 02 00 01 00 14 28`；13:56:54 在同一连接继续发送合法 HELLO 后仍收到正确 19B ACK+READY，证明未知命令不会关闭或破坏连接。
 - 2026-10-19 经用户许可再次核对默认缓存：Visual Studio 17 2022、x64、多配置、MSVC 19.38.33145.0（工具集目录 14.38.33130），并显式使用 `RelWithDebInfo`。执行 `cmake --build build --config RelWithDebInfo --target device_simulator protocol_tests --verbose` 成功；协议库、`WinsockRuntime.cpp`、`main.cpp` 和全部测试源实际重新编译并链接，两个目标均为 0 警告、0 错误。
 - 2026-10-19 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：36 个测试用例、268 个断言全部通过。
+- 2026-10-21 再次核对 `build/CMakeCache.txt`：生成器为 Visual Studio 17 2022、x64、多配置并包含 `RelWithDebInfo`；实际构建日志确认使用 MSVC 14.38 工具集和 C++17。执行 `cmake --build build --config RelWithDebInfo --target device_simulator protocol_tests --verbose` 成功，两个目标均为 0 警告、0 错误。
+- 2026-10-21 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：36 个测试用例、268 个断言全部通过。
+- 2026-10-21 用户提供同一 NetAssist 连接的连续记录：HELLO 精确返回 ACK(HELLO)+STATUS(READY)，START 精确返回 ACK(START)+STATUS(RUNNING)，约 15.1 秒后发送 STOP 仍精确返回 ACK(STOP)+STATUS(IDLE)，且收发时间戳没有可见延迟。由此确认 Running 状态下反复执行临时 20ms DATA tick 不会阻断当前控制命令处理；期间无 DATA 符合当前骨架设计。
 - 2026-10-19 用户提供 NetAssist 字节记录并明确确认来自同一 TCP 连接：HELLO 返回精确 ACK(HELLO)+STATUS(READY)，START 返回精确 ACK(START)+STATUS(RUNNING)，STOP 返回精确 ACK(STOP)+STATUS(IDLE)，随后再次 START 返回精确 ACK(START)+STATUS(RUNNING)；重复 HELLO 连续两次均返回精确 `ERROR(BAD_STATE)` `A5 5A 01 7F 02 00 04 00 17 78`，第二次仍能收到响应，证明第一次 BAD_STATE 后连接保持。粘贴的时间戳顺序不连续，因此“同一连接”依据用户明确确认记录，而非仅由日志时间戳推断。
 - 2026-10-19 22:23–22:27 用户在一条连续 NetAssist 连接中依次验证：HELLO→READY、START→RUNNING、重复 START→BAD_STATE、STOP→IDLE、重复 STOP→BAD_STATE、采样率为 0 的 START→BAD_PARAM、合法 START→RUNNING、非空 payload 的 STOP→BAD_PARAM、合法 STOP→IDLE。每个响应帧字节均与协议预期完全一致；每次错误后的合法命令均成功，证明连接和原会话状态保持。HELLO/START/STOP 最小控制状态机据此完成手工端到端验收。
 
 ## 已实现但未验证
 
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
+- 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建和协议回归；当前 tick 只推进截止时间，不生成或发送 DATA，尚未完成真实 TCP 联调。
 
 ## 待处理/已知问题
 
 - 旧 VS2019 + Ninja 构建树在助手环境持续报 MSVC `C1902`，原因指向 14.29 PDB 工具组件版本不一致；该问题保留为历史环境记录，但 VS2019 已不再是当前默认门槛，不阻断后续主线。
-- 当前仍是单客户端、单次 `accept()` 的 S7 最小实现；连接结束后服务端进程退出，尚不能连续接受新客户端。
+- 已验收的 `ed18169` 基线是单客户端、单次 `accept()`；`d68a768` 已改成多客户端循环，但该扩展不属于当前阶段且存在下列静态阻断项，不能视为已验收能力。
 - `send_all()` 的部分发送分支和各 Winsock 失败清理路径已有代码审查与构建证据，但尚未通过故障注入强制触发。
+- 当前 20ms DATA tick 只是事件循环骨架，不代表已经实现协议 DATA；尚未保存 START 的采样率/通道掩码，也未生成 `chanId/seq/ts/cnt/samples`、UTC 时间戳或波形数据。
+- 单客户端仍使用阻塞式 `send_all()`；对当前小响应和单连接骨架可以保留，但正式连续 DATA 推流前需要评估慢接收端导致 STOP 处理延迟的边界，不能把本轮骨架外推为发送背压已解决。
+- `Doc/项目规划V3.1.md` 第 2.4 节仍把 DATA 的 `ts` 描述为“模拟器启动后的单调时间”，与权威 `Doc/协议文档.md` 的“UTC Unix Epoch 微秒”冲突。按仓库优先级，线上 DATA 必须使用 UTC Epoch；`steady_clock` 仅用于本机节拍和超时。
+- 工作区新增 DATA 代码尚未通过审查：成功 START 后访问不存在的 payload 索引 6～9；正常 `select()` 超时路径只推进截止时间而不发送；单个 `seq_` 不能表达每通道独立计数且再次 START 不重置；任意 `sample_rate` 直接窄化为 `uint16_t cnt`，没有保证 `cnt <= 1020`；逾期时循环补发所有批次并调用阻塞式 `send_all()`，可能长期推迟 STOP。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-10-19 新会话核对时本地 `main`、`origin/main` 与 `HEAD e1f5180` 一致，工作区无未提交或暂存修改；该提交已包含状态机静态修正、内部状态模型收口、入口调试输出清理、流程图、进度与自测题维护。
+- 2026-10-20 核对时本地 `main`、`origin/main` 与 `HEAD d68a768` 一致；按用户授权直接修改后的工作区已恢复单客户端并加入 DATA tick 骨架，涉及 `WinsockRuntime.cpp/.h`。审查过程中检测到用户侧 `Doc/VirtualBenth.drawio` 及 draw.io 临时/备份文件，均未触碰。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -129,12 +137,17 @@
 28. 2026-10-19 审查用户提供的 NetAssist 日志：START、STOP、再次 START 和重复 HELLO 的请求/响应字节全部符合协议；连续两次重复 HELLO 均收到 BAD_STATE，证明非致命错误后连接保持。由于成功 HELLO 的日志时间晚于 START→STOP→START，尚缺同一连接完整成功序列的可核对时间证据，本轮不提前宣告完整状态机验收通过。
 29. 2026-10-19 用户明确确认上述 HELLO、START、STOP、再次 START 记录来自同一 TCP 连接；据此接受用户提供的连接身份补充证据，成功主路径和重复 HELLO 错误保持路径通过手工联调验收。粘贴的时间戳本身仍不构成连续顺序证据，进度记录保留这一证据来源差异。
 30. 2026-10-19 审查 22:23–22:27 的连续 NetAssist 日志：HELLO、START、STOP 成功响应，重复 START/STOP 的 BAD_STATE，零采样率 START 与非空 STOP 的 BAD_PARAM 均为精确预期字节；每次错误后通过合法 STOP/START 继续成功转换，证明连接与原状态保持。S7 HELLO/START/STOP 最小控制状态机完成默认环境构建、协议回归和手工端到端验收。
+31. 2026-10-20 静态审查提交 `d68a768` 及工作区注释补丁：可移动 Socket 所有权与逐连接解析状态方向本身合理，但实现提前扩展多客户端且没有 DATA 定时；发现单客户端协议/发送错误会退出整个服务端、阻塞发送会卡住事件循环、发送队列字段未接入、`FD_SETSIZE` 无边界和头文件契约过时等阻断项。当前审查不通过，本轮未运行构建、测试或联调。
+32. 2026-10-20 用户明确授权助手实现修正：工作区移除 `ClientSession` 容器、Socket 移动语义、未使用发送队列和多客户端 accept 循环，恢复单连接所有权；加入基于 `steady_clock` 的临时 20ms 截止点和有界 `select()` timeout，只有成功 START 后启用 tick，STOP 后通过状态门控停用，下一次 START 重新建立节拍。同步更新头文件职责说明，静态复审与 `git diff --check` 通过；本轮未运行构建、测试或联调。
+33. 2026-10-21 经用户以“下一步”授权执行验收：重新核对默认 `build` 缓存后，使用 VS2022、x64、MSVC 14.38、C++17 和 `RelWithDebInfo` 构建 `device_simulator` 与 `protocol_tests`，两个目标均为 0 警告、0 错误；随后 CTest 1/1、Catch2 36 个用例和 268 个断言全部通过。DATA tick 骨架取得构建与协议回归证据，下一门槛为同一真实 TCP 连接的 HELLO→START→STOP 联调。
+34. 2026-10-21 审查用户提供的连续 NetAssist 日志：HELLO、START、STOP 的六个响应帧均逐字节符合协议；START 与 STOP 相隔约 15.1 秒，STOP 仍在日志同一毫秒收到 ACK+IDLE，证明 Running 状态反复 tick 后控制通路保持响应。DATA tick 骨架完成构建、回归与真实 TCP 联调验收。对照下一阶段资料时发现规划文档的 DATA 时间戳旧描述与协议冲突，明确以后者的 UTC Epoch 定义为准。
+35. 2026-10-21 静态审查用户新增的 START 配置与 DATA 发送代码：实现范围超出当前“只保存采样上下文”小步，并存在多个阻断项。最直接的问题是 START payload 仅有索引 0～4，代码却在已发送 ACK+RUNNING 后读取索引 6～9，会抛出 `std::out_of_range` 并关闭连接；正常定时到期走 `ready == 0` 分支时又完全不发送 DATA。另有单一序号、重启不复位、样本数溢出/超长、逾期追赶阻塞控制通路及头文件契约过时等问题。本轮审查不通过，未运行构建、测试或联调。
 
 ## 下一步流程
 
-1. 对照 `Doc/协议文档.md` 的 DATA 帧、时间戳、序号和连接处置约束，冻结模拟器当前阶段必须承担的最小职责。
-2. 选择不阻塞控制命令处理的最小节拍/发送结构，明确 START、STOP 和断线时资源与状态如何收束。
-3. 先列出可验收的 DATA 字节、节拍、序号和停止条件，再由用户实现核心代码；暂不扩展多客户端、GUI 或数据库。
+1. 删除本轮提前加入的 DATA 生成与发送循环，恢复已经验收的空 tick 行为；不要把采样配置作为 `TcpServer` 构造参数暴露。
+2. 增加连接局部的采样上下文，只在 START 参数合法且 ACK+RUNNING 发送成功后提交 `sample_rate`、`chan_mask`，并将 8 个通道的独立序号初始化为 0；STOP 和断线清理上下文，再次 START 建立新上下文。
+3. 静态审查通过并经许可完成默认环境构建回归后，再单独设计 `cnt <= 1020`、低采样率余数累计、时间戳和发送背压，不在本小步发送 DATA。
 
 ## 暂不开始
 

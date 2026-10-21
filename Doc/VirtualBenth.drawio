@@ -1,0 +1,152 @@
+<mxfile host="Electron" modified="2026-10-21T12:51:00.493Z" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/24.6.4 Chrome/124.0.6367.207 Electron/30.0.6 Safari/537.36" etag="4XX3lpViMGEsmBRuRK3d" version="24.6.4" type="device">
+  <diagram name="第 1 页" id="KoepIXtTitRXrpfx8V8C">
+    <mxGraphModel dx="536" dy="810" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-1" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="140" y="40" width="620" height="960" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-1" value="创建服务端监听listen_socket" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="340" y="60" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-2" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" parent="1" edge="1" source="cfbb82ZVUiVW51O-0LmL-1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="420" y="130" as="sourcePoint" />
+            <mxPoint x="420" y="150" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-3" value="开启监听&lt;div&gt;bind + listen&lt;br&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="360" y="150" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-4" value="" style="endArrow=classic;html=1;rounded=0;" parent="1" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="420" y="210" as="sourcePoint" />
+            <mxPoint x="420" y="280" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-5" value="初始化readfds&lt;div&gt;向readfds中添加监听socket和所有客户端的socket句柄&lt;br&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="340" y="280" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-6" value="" style="endArrow=classic;html=1;rounded=0;" parent="1" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="420" y="340" as="sourcePoint" />
+            <mxPoint x="420" y="400" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-7" value="判断实际可读子集中是否包含&lt;br&gt;监听socket" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="340" y="524.5" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-8" value="阻塞等待select" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="340" y="400" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-9" value="" style="endArrow=classic;html=1;rounded=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" target="cfbb82ZVUiVW51O-0LmL-7" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="420" y="460" as="sourcePoint" />
+            <mxPoint x="470" y="410" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-10" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="cfbb82ZVUiVW51O-0LmL-7" target="cfbb82ZVUiVW51O-0LmL-11" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="420" y="700" as="sourcePoint" />
+            <mxPoint x="420" y="650" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-11" value="包含则通过accept获取新连接，并将新socket加入数组中" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="340" y="660" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-12" value="" style="endArrow=classic;html=1;rounded=0;" parent="1" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="420" y="720" as="sourcePoint" />
+            <mxPoint x="420" y="800" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-13" value="遍历所有客户端&lt;br&gt;如果当前客户端在可读子集中&lt;div&gt;就通过recv获取字节流&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="340" y="800" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-14" value="" style="endArrow=classic;html=1;rounded=0;" parent="1" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="420" y="860" as="sourcePoint" />
+            <mxPoint x="420" y="920" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-15" value="处理客户端发来的字节流，并给客户端响应，&lt;div&gt;对于没有发送字节的客户端，则从数组中删除&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="280" y="920" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cfbb82ZVUiVW51O-0LmL-17" value="" style="edgeStyle=elbowEdgeStyle;elbow=horizontal;endArrow=classic;html=1;curved=0;rounded=0;endSize=8;startSize=8;" parent="1" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="560" y="950" as="sourcePoint" />
+            <mxPoint x="420" y="240" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="600" y="580" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-2" value="多客户端流程" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="370" y="8" width="100" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-4" value="创建服务端监听listen_socket&lt;div&gt;绑定服务端地址配置 bind&lt;/div&gt;&lt;div&gt;开始监听 listen&lt;/div&gt;&lt;div&gt;阻塞等待客户端连接 accept&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="60" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-5" value="单客户端数据发送流程" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="8" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-6" value="" style="endArrow=classic;html=1;rounded=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="1180" y="120" as="sourcePoint" />
+            <mxPoint x="1180" y="200" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-7" value="创建套接字读集合 readfds&lt;br&gt;监听socket集合 select" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="200" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-8" value="" style="endArrow=classic;html=1;rounded=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="1179.5" y="260" as="sourcePoint" />
+            <mxPoint x="1179.5" y="340" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-9" value="获取客户端发送的数据 recv&lt;div&gt;解析为帧frame&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="340" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-10" value="" style="endArrow=classic;html=1;rounded=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="1180" y="400" as="sourcePoint" />
+            <mxPoint x="1180" y="480" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-11" value="如果上一个状态非Running但是当前状态为Running，则更新下一次数据发送时间 next_data_deadline" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="480" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-13" value="" style="edgeStyle=segmentEdgeStyle;endArrow=classic;html=1;curved=0;rounded=0;endSize=8;startSize=8;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" target="XpYtbFFSGsj0Ki5AmPvk-15">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="1040" y="230" as="sourcePoint" />
+            <mxPoint x="960" y="310" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-15" value="如果等待超时ready==0，则在没有&amp;gt;=next_data_deadline时间时，发送并更新next_data_deadline" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="840" y="320" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-16" value="" style="edgeStyle=segmentEdgeStyle;endArrow=classic;html=1;curved=0;rounded=0;endSize=8;startSize=8;exitX=0.25;exitY=0;exitDx=0;exitDy=0;" edge="1" parent="1" source="XpYtbFFSGsj0Ki5AmPvk-15">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="880" y="260" as="sourcePoint" />
+            <mxPoint x="1180" y="160" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="890" y="160" />
+              <mxPoint x="1030" y="160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="XpYtbFFSGsj0Ki5AmPvk-17" value="" style="edgeStyle=elbowEdgeStyle;elbow=horizontal;endArrow=classic;html=1;curved=0;rounded=0;endSize=8;startSize=8;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="1320" y="510" as="sourcePoint" />
+            <mxPoint x="1180" y="160" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="1360" y="340" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

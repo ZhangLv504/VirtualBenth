@@ -2,6 +2,7 @@
 #define VIRTUALBENTH_WINSOCKRUNTIME_H
 
 #include <cstdint>
+#include <vector>
 
 // 本文件只暴露模拟器启动所需的最小接口。
 // Winsock、SOCKET、sockaddr_in 等 Windows 细节全部留在 .cpp 中，避免调用方
@@ -29,18 +30,18 @@ public:
     WinsockRuntime& operator=(WinsockRuntime&&) = delete;
 };
 
-// S7 的最小阻塞式 TCP 服务端。
+// S7 的单客户端 TCP 服务端与 DATA 节拍事件循环骨架。
 //
-// 当前边界刻意保持简单：绑定本机 loopback、阻塞等待一个客户端、在当前线程
-// 接收字节流，并完成 HELLO/START/STOP 的最小控制状态机。多客户端循环与
-// DATA 周期推流属于后续阶段，不在此类当前职责内。
+// 当前边界刻意保持简单：绑定本机 loopback、只接受一个客户端，并在当前线程
+// 通过 select() 同时等待控制字节和 Running 状态下的下一 DATA 截止时间。
+// 当前只搭建 tick 骨架，尚不生成 DATA；多客户端循环属于后续阶段。
 class TcpServer final
 {
 public:
     // port 使用主机字节序保存；填充 sockaddr_in 时再通过 htons() 转为网络字节序。
-    explicit TcpServer(std::uint16_t port = 12345) noexcept;
+    explicit TcpServer(std::uint16_t port = 12345, uint32_t sample_rate = 10, uint8_t chan_mask = 1) noexcept;
 
-    // 依次完成 socket → bind → listen → accept → recv/process/send。
+    // 依次完成 socket → bind → listen → accept → select → recv/process/send。
     // 返回 true：客户端正常断开，或服务端已按协议发送错误并主动关闭连接。
     // 返回 false：Winsock API、协议编码或响应发送失败。
     // 本函数为阻塞调用，直到当前唯一客户端会话结束才返回。
@@ -49,6 +50,10 @@ public:
 private:
     // 保持主机字节序，便于日志输出和构造函数参数传递。
     std::uint16_t port_;
+    // START命令的 采样率 和 通道 和 缓存
+    uint32_t sample_rate_;
+    uint8_t chan_mask_;
+    uint32_t seq_;
 };
 
 #endif // VIRTUALBENTH_WINSOCKRUNTIME_H
