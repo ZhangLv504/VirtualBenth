@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext` 已完成静态、构建、回归及真实 TCP 联调验收；当前仍不生成 DATA。对照权威协议和实际事件循环后，已在 `Doc/协议文档.md` 冻结 V1 模拟器出数策略：20ms tick、整数样本余数累计、过期 tick 不无界追赶、`cnt <= 1020` 分帧、逐通道序号、无漂移 UTC 时间线，以及非阻塞 64KiB 有界发送队列。
-- 当前唯一目标：实现并自动化测试纯计算的样本预算器，只覆盖 20ms tick 的余数累计、低采样率、非整除采样率和 `cnt <= 1020` 分段；本小步不改 Socket、不发送 DATA。
+- 当前状态：连接局部 `SamplingContext` 已完成静态、构建、回归及真实 TCP 联调验收；不依赖 Winsock 的 `SampleBudget` 已完成实现并通过默认环境自动化测试，覆盖 20ms tick 的整数余数累计、低采样率、非整除采样率和 `cnt <= 1020` 分段。当前仍不生成或发送 DATA。
+- 当前唯一目标：实现并自动化测试不依赖 Socket 的 64KiB 有界发送队列核心，只覆盖控制帧优先、DATA 背压、部分发送偏移和完整帧出队；本小步不修改 Socket 模式、不接入真实 DATA。
 
 ## 默认构建环境
 
@@ -77,11 +77,13 @@
 - 2026-10-22 用户提供同一 NetAssist 连接的连续日志：HELLO→READY、第一次 START→RUNNING、STOP→IDLE、第二次 START→RUNNING、第二次 STOP→IDLE，五组响应均逐字节符合协议。第二次 START 未重新 HELLO 仍成功，证明会话确实从 Idle 重新进入 Running；两段 Running 分别持续约 16.6 秒和 11.7 秒，STOP 均无可见阻塞。当前无 DATA 符合阶段边界。
 - 2026-10-19 用户提供 NetAssist 字节记录并明确确认来自同一 TCP 连接：HELLO 返回精确 ACK(HELLO)+STATUS(READY)，START 返回精确 ACK(START)+STATUS(RUNNING)，STOP 返回精确 ACK(STOP)+STATUS(IDLE)，随后再次 START 返回精确 ACK(START)+STATUS(RUNNING)；重复 HELLO 连续两次均返回精确 `ERROR(BAD_STATE)` `A5 5A 01 7F 02 00 04 00 17 78`，第二次仍能收到响应，证明第一次 BAD_STATE 后连接保持。粘贴的时间戳顺序不连续，因此“同一连接”依据用户明确确认记录，而非仅由日志时间戳推断。
 - 2026-10-19 22:23–22:27 用户在一条连续 NetAssist 连接中依次验证：HELLO→READY、START→RUNNING、重复 START→BAD_STATE、STOP→IDLE、重复 STOP→BAD_STATE、采样率为 0 的 START→BAD_PARAM、合法 START→RUNNING、非空 payload 的 STOP→BAD_PARAM、合法 STOP→IDLE。每个响应帧字节均与协议预期完全一致；每次错误后的合法命令均成功，证明连接和原会话状态保持。HELLO/START/STOP 最小控制状态机据此完成手工端到端验收。
+- 2026-10-22 在默认 VS2022、x64、MSVC 14.38、C++17、`RelWithDebInfo` 环境执行 `cmake --build build --config RelWithDebInfo --target device_simulator protocol_tests sample_budget_tests --verbose` 成功，三个目标均为 0 警告、0 错误；构建日志确认新 `sample_budget.cpp`、`test_sample_budget.cpp` 及修正后的 `WinsockRuntime.cpp` 实际参与编译。
+- 2026-10-22 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：2/2 通过，0 失败；直接运行 `protocol_tests.exe` 为 36 个用例、268 个断言通过，`sample_budget_tests.exe` 为 4 个用例、68 个断言通过。10Hz、10001Hz、单 tick 2500 样本分段和零采样率拒绝均取得自动化证据。
 
 ## 已实现但未验证
 
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
-- 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建和协议回归；当前 tick 只推进截止时间，不生成或发送 DATA，尚未完成真实 TCP 联调。
+- 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建、协议回归和真实 TCP 控制路径联调；当前 tick 只推进截止时间，不生成或发送 DATA。
 - 连接局部 `SamplingContext` 已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。由于当前尚不发送 DATA，采样率值、通道掩码内容和序号清零仍没有线上可观察数据，后续 DATA 首帧测试需继续覆盖这些内部结果。
 
 ## 待处理/已知问题
@@ -89,14 +91,14 @@
 - 旧 VS2019 + Ninja 构建树在助手环境持续报 MSVC `C1902`，原因指向 14.29 PDB 工具组件版本不一致；该问题保留为历史环境记录，但 VS2019 已不再是当前默认门槛，不阻断后续主线。
 - 已验收的 `ed18169` 基线是单客户端、单次 `accept()`；`d68a768` 已改成多客户端循环，但该扩展不属于当前阶段且存在下列静态阻断项，不能视为已验收能力。
 - `send_all()` 的部分发送分支和各 Winsock 失败清理路径已有代码审查与构建证据，但尚未通过故障注入强制触发。
-- 当前 20ms DATA tick 只是事件循环骨架，不代表已经实现协议 DATA；START 的采样率/通道掩码及独立序号状态已在工作区保存，但尚未生成 `chanId/seq/ts/cnt/samples`、UTC 时间戳或波形数据。
+- 当前 20ms DATA tick 和 `SampleBudget` 只完成调度与样本数量计算，不代表已经实现协议 DATA；START 的采样率/通道掩码及独立序号状态已在工作区保存，但尚未生成 `chanId/seq/ts/cnt/samples`、UTC 时间戳或波形数据。
 - 单客户端仍使用阻塞式 `send_all()`；对当前小响应和单连接骨架可以保留，但正式连续 DATA 推流前需要评估慢接收端导致 STOP 处理延迟的边界，不能把本轮骨架外推为发送背压已解决。
 - `Doc/项目规划V3.1.md` 第 2.4 节仍把 DATA 的 `ts` 描述为“模拟器启动后的单调时间”，与权威 `Doc/协议文档.md` 的“UTC Unix Epoch 微秒”冲突。按仓库优先级，线上 DATA 必须使用 UTC Epoch；`steady_clock` 仅用于本机节拍和超时。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-10-22 核对时本地 `main`、`origin/main` 与 `HEAD 07caac3` 一致；工作区仅有 `WinsockRuntime.cpp` 的用户注释补充，随后因进度和自测维护增加文档修改。本轮未提交、未推送。
+- 2026-10-22 本轮开始时本地 `main`、`origin/main` 与 `HEAD 0d56a91` 一致且工作区干净。静态审查发现该提交把未完成的 DATA 构造与阻塞发送提前接入事件循环，并且每轮把 `sample_credit` 清零、只在非正常逾期分支生成 DATA；工作区已撤回这些越界实现，改为独立 `simulator_core`、`SampleBudget` 及专用测试。本轮未提交、未推送。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -149,12 +151,14 @@
 37. 2026-10-22 用户以“下一步”许可执行验收：重新核对最新 Git、源码与默认构建缓存后，使用 VS2022、x64、MSVC 14.38、C++17 和 `RelWithDebInfo` 实际重新编译 `WinsockRuntime.cpp` 并链接 `device_simulator`，同时构建 `protocol_tests`，两个目标均为 0 警告、0 错误；随后 CTest 1/1、Catch2 36 个用例和 268 个断言全部通过。采样上下文取得构建与协议回归证据，下一门槛为同一连接再次 START 的真实 TCP 联调。
 38. 2026-10-22 审查用户提供的 NetAssist 日志：同一连接依次完成 HELLO、START、STOP、再次 START、再次 STOP，五组 ACK/STATUS 响应均精确匹配协议。第二次 START 没有重新 HELLO 却从 Idle 成功进入 Running，证明控制会话能够复用；两次 STOP 均及时返回。连接局部采样上下文小步据此完成静态、构建、回归和真实 TCP 控制路径验收。后台模拟器在助手轮询前已结束且没有保留额外控制台输出，因此此条以客户端连续日志为证据。
 39. 2026-10-22 对照 `Doc/协议文档.md` 与当前 `select()` 空 tick 实现，冻结 DATA 生成和发送边界：逻辑 tick 为 20ms；用 64 位整数 credit 保留低采样率及非整除余数；单帧 `cnt` 不超过 1020；过期 tick 丢弃而非无界追赶；逐通道序号仅在完整帧入队后递增；UTC 样本时间用整数余数推进。连续 DATA 不再沿用阻塞式 `send_all()`，实现前必须先建立非阻塞 Socket、64KiB 有界队列、部分发送进度与控制帧优先规则。本轮只更新设计文档，未修改功能代码，未运行构建、测试或联调。
+40. 2026-10-22 静态审查最新提交 `0d56a91`：发现 `sample_credit` 在每轮 Running 循环中清零，无法保存跨 tick 余数；正常 `select()` 超时路径不生成 DATA；同时提前使用阻塞式 `send_all()`、未初始化的服务器采样字段和 8 位序号，超出已冻结的小步边界。按用户既有授权直接撤回这些 DATA/Socket 改动，保留用户的事件循环注释，并新增独立 `simulator_core`、`SampleBudget` 和自动化测试。
+41. 2026-10-22 默认环境重新构建 `device_simulator`、`protocol_tests`、`sample_budget_tests` 成功，0 警告、0 错误；CTest 2/2 通过，两个测试程序分别为 36 个用例/268 个断言和 4 个用例/68 个断言全部通过；`git diff --check` 无错误。纯计算样本预算器小步完成，真实 DATA 仍未接入。
 
 ## 下一步流程
 
-1. 实现不依赖 Winsock 的样本预算器：输入 `sample_rate` 和一个逻辑 tick，输出本 tick 样本总数、最多 1020 的分段列表及新的 credit。
-2. 增加自动化测试：10Hz 的五个 tick 才累计出 1 个样本；10001Hz 连续 50 tick 合计 10001；高采样率分段均不超过 1020且总数不丢失。
-3. 该纯计算小步验收后，再实现非阻塞有界发送队列；发送队列完成前不接入真实 DATA。
+1. 先实现不依赖 Winsock 的 64KiB 有界发送队列核心，分别保存控制帧与 DATA 帧，并记录队首帧的部分发送偏移。
+2. 增加自动化测试：控制帧优先于尚未开始发送的 DATA；已部分发送的帧不能被插队；容量不足时拒绝新增 DATA 且内存不越界；完整发送后才出队。
+3. 该纯队列小步验收后，再把客户端 Socket 切换为非阻塞并接入 `writefds`；这两步完成前不生成真实 DATA。
 
 ## 暂不开始
 

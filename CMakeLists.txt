@@ -16,9 +16,9 @@ else()
     add_compile_options(-finput-charset=UTF-8)
 endif()
 
-# 开启 ctest（add_test 依赖它） 
+# 开启 ctest（add_test 依赖它）
 enable_testing()
 
 add_subdirectory(protocol)
-add_subdirectory(tests) 
 add_subdirectory(device_simulator)
+add_subdirectory(tests)

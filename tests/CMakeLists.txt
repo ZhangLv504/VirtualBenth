@@ -19,3 +19,15 @@ target_link_libraries(protocol_tests PRIVATE
 )
 
 add_test(NAME protocol_tests COMMAND protocol_tests)
+
+# 模拟器纯计算逻辑独立测试，不启动 Winsock 或监听端口。
+add_executable(sample_budget_tests
+    test_sample_budget.cpp
+)
+
+target_link_libraries(sample_budget_tests PRIVATE
+    simulator_core
+    catch2_amalgamated
+)
+
+add_test(NAME sample_budget_tests COMMAND sample_budget_tests)
