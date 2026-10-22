@@ -1,14 +1,14 @@
 # VirtualBenth 项目进度
 
-> 最近核对：2026-10-21（Asia/Shanghai）
+> 最近核对：2026-10-22（Asia/Shanghai）
 > 用途：给当前与新会话提供动态交接。开始工作时仍须核对 Git、实际文件和最新测试输出。
 
 ## 当前阶段
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：已验收的 HELLO/START/STOP 与空 DATA tick 骨架基线仍成立。用户提交 `1baabc1` 仍提前包含真实 DATA 生成；按用户授权，工作区已撤回该发送逻辑并实现连接局部 `SamplingContext`：成功 START 后提交采样率/通道掩码并清零 8 个独立序号，STOP 成功后清空，断线时随局部作用域销毁。静态复审和 `git diff --check` 通过，尚未构建、测试或联调。
-- 当前唯一目标：取得许可后在默认 MSVC 2022 + RelWithDebInfo 环境构建 `device_simulator` 与 `protocol_tests` 并运行协议回归，确认采样上下文改造未破坏控制状态机。
+- 当前状态：连接局部 `SamplingContext` 已完成静态、构建、回归及真实 TCP 联调验收；当前仍不生成 DATA。对照权威协议和实际事件循环后，已在 `Doc/协议文档.md` 冻结 V1 模拟器出数策略：20ms tick、整数样本余数累计、过期 tick 不无界追赶、`cnt <= 1020` 分帧、逐通道序号、无漂移 UTC 时间线，以及非阻塞 64KiB 有界发送队列。
+- 当前唯一目标：实现并自动化测试纯计算的样本预算器，只覆盖 20ms tick 的余数累计、低采样率、非整除采样率和 `cnt <= 1020` 分段；本小步不改 Socket、不发送 DATA。
 
 ## 默认构建环境
 
@@ -72,6 +72,9 @@
 - 2026-10-21 再次核对 `build/CMakeCache.txt`：生成器为 Visual Studio 17 2022、x64、多配置并包含 `RelWithDebInfo`；实际构建日志确认使用 MSVC 14.38 工具集和 C++17。执行 `cmake --build build --config RelWithDebInfo --target device_simulator protocol_tests --verbose` 成功，两个目标均为 0 警告、0 错误。
 - 2026-10-21 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：36 个测试用例、268 个断言全部通过。
 - 2026-10-21 用户提供同一 NetAssist 连接的连续记录：HELLO 精确返回 ACK(HELLO)+STATUS(READY)，START 精确返回 ACK(START)+STATUS(RUNNING)，约 15.1 秒后发送 STOP 仍精确返回 ACK(STOP)+STATUS(IDLE)，且收发时间戳没有可见延迟。由此确认 Running 状态下反复执行临时 20ms DATA tick 不会阻断当前控制命令处理；期间无 DATA 符合当前骨架设计。
+- 2026-10-22 核对 `build/CMakeCache.txt` 确认 Visual Studio 17 2022、x64、多配置并包含 `RelWithDebInfo`；实际构建日志确认使用 MSVC 14.38 与 C++17。执行 `cmake --build build --config RelWithDebInfo --target device_simulator protocol_tests --verbose` 成功，两个目标均为 0 警告、0 错误。
+- 2026-10-22 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：1/1 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/protocol_tests.exe`：36 个测试用例、268 个断言全部通过。
+- 2026-10-22 用户提供同一 NetAssist 连接的连续日志：HELLO→READY、第一次 START→RUNNING、STOP→IDLE、第二次 START→RUNNING、第二次 STOP→IDLE，五组响应均逐字节符合协议。第二次 START 未重新 HELLO 仍成功，证明会话确实从 Idle 重新进入 Running；两段 Running 分别持续约 16.6 秒和 11.7 秒，STOP 均无可见阻塞。当前无 DATA 符合阶段边界。
 - 2026-10-19 用户提供 NetAssist 字节记录并明确确认来自同一 TCP 连接：HELLO 返回精确 ACK(HELLO)+STATUS(READY)，START 返回精确 ACK(START)+STATUS(RUNNING)，STOP 返回精确 ACK(STOP)+STATUS(IDLE)，随后再次 START 返回精确 ACK(START)+STATUS(RUNNING)；重复 HELLO 连续两次均返回精确 `ERROR(BAD_STATE)` `A5 5A 01 7F 02 00 04 00 17 78`，第二次仍能收到响应，证明第一次 BAD_STATE 后连接保持。粘贴的时间戳顺序不连续，因此“同一连接”依据用户明确确认记录，而非仅由日志时间戳推断。
 - 2026-10-19 22:23–22:27 用户在一条连续 NetAssist 连接中依次验证：HELLO→READY、START→RUNNING、重复 START→BAD_STATE、STOP→IDLE、重复 STOP→BAD_STATE、采样率为 0 的 START→BAD_PARAM、合法 START→RUNNING、非空 payload 的 STOP→BAD_PARAM、合法 STOP→IDLE。每个响应帧字节均与协议预期完全一致；每次错误后的合法命令均成功，证明连接和原会话状态保持。HELLO/START/STOP 最小控制状态机据此完成手工端到端验收。
 
@@ -79,7 +82,7 @@
 
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
 - 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建和协议回归；当前 tick 只推进截止时间，不生成或发送 DATA，尚未完成真实 TCP 联调。
-- 工作区新增连接局部 `SamplingContext`：仅在合法 START 的 ACK+RUNNING 均发送成功后提交 `sample_rate`、`channel_mask` 并将 8 个通道序号清零；STOP 成功时清空，断线时随 `run()` 局部作用域销毁。该修改已通过静态复审，尚未构建、测试或联调。
+- 连接局部 `SamplingContext` 已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。由于当前尚不发送 DATA，采样率值、通道掩码内容和序号清零仍没有线上可观察数据，后续 DATA 首帧测试需继续覆盖这些内部结果。
 
 ## 待处理/已知问题
 
@@ -93,7 +96,7 @@
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-10-21 核对时本地 `HEAD 1baabc1` 比 `origin/main 1deb723` 超前 1 个提交；按用户授权修改后的工作区已撤回提前加入的 DATA 发送并实现连接局部采样上下文，涉及 `WinsockRuntime.cpp/.h`。本轮未提交、未推送。
+- 2026-10-22 核对时本地 `main`、`origin/main` 与 `HEAD 07caac3` 一致；工作区仅有 `WinsockRuntime.cpp` 的用户注释补充，随后因进度和自测维护增加文档修改。本轮未提交、未推送。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -143,12 +146,15 @@
 34. 2026-10-21 审查用户提供的连续 NetAssist 日志：HELLO、START、STOP 的六个响应帧均逐字节符合协议；START 与 STOP 相隔约 15.1 秒，STOP 仍在日志同一毫秒收到 ACK+IDLE，证明 Running 状态反复 tick 后控制通路保持响应。DATA tick 骨架完成构建、回归与真实 TCP 联调验收。对照下一阶段资料时发现规划文档的 DATA 时间戳旧描述与协议冲突，明确以后者的 UTC Epoch 定义为准。
 35. 2026-10-21 静态审查用户新增的 START 配置与 DATA 发送代码：实现范围超出当前“只保存采样上下文”小步，并存在多个阻断项。最直接的问题是 START payload 仅有索引 0～4，代码却在已发送 ACK+RUNNING 后读取索引 6～9，会抛出 `std::out_of_range` 并关闭连接；正常定时到期走 `ready == 0` 分支时又完全不发送 DATA。另有单一序号、重启不复位、样本数溢出/超长、逾期追赶阻塞控制通路及头文件契约过时等问题。本轮审查不通过，未运行构建、测试或联调。
 36. 2026-10-21 用户提交 `1baabc1` 后要求“还有问题直接修改”：最新代码已修正 START 索引并改为 8 个序号，但仍提前生成 DATA，序号数组未初始化，且 `seqs_[chan_id]++ > UINT32_MAX` 对 `uint32_t` 永远不成立。按授权直接撤回全部 DATA 构造/发送及公开构造参数，新增连接局部 `SamplingContext`；START 成功后提交配置并清零逐通道序号，STOP 成功后清空，断线自然销毁。静态复审与 `git diff --check` 通过，本轮未运行构建、测试或联调。
+37. 2026-10-22 用户以“下一步”许可执行验收：重新核对最新 Git、源码与默认构建缓存后，使用 VS2022、x64、MSVC 14.38、C++17 和 `RelWithDebInfo` 实际重新编译 `WinsockRuntime.cpp` 并链接 `device_simulator`，同时构建 `protocol_tests`，两个目标均为 0 警告、0 错误；随后 CTest 1/1、Catch2 36 个用例和 268 个断言全部通过。采样上下文取得构建与协议回归证据，下一门槛为同一连接再次 START 的真实 TCP 联调。
+38. 2026-10-22 审查用户提供的 NetAssist 日志：同一连接依次完成 HELLO、START、STOP、再次 START、再次 STOP，五组 ACK/STATUS 响应均精确匹配协议。第二次 START 没有重新 HELLO 却从 Idle 成功进入 Running，证明控制会话能够复用；两次 STOP 均及时返回。连接局部采样上下文小步据此完成静态、构建、回归和真实 TCP 控制路径验收。后台模拟器在助手轮询前已结束且没有保留额外控制台输出，因此此条以客户端连续日志为证据。
+39. 2026-10-22 对照 `Doc/协议文档.md` 与当前 `select()` 空 tick 实现，冻结 DATA 生成和发送边界：逻辑 tick 为 20ms；用 64 位整数 credit 保留低采样率及非整除余数；单帧 `cnt` 不超过 1020；过期 tick 丢弃而非无界追赶；逐通道序号仅在完整帧入队后递增；UTC 样本时间用整数余数推进。连续 DATA 不再沿用阻塞式 `send_all()`，实现前必须先建立非阻塞 Socket、64KiB 有界队列、部分发送进度与控制帧优先规则。本轮只更新设计文档，未修改功能代码，未运行构建、测试或联调。
 
 ## 下一步流程
 
-1. 经用户许可重新核对 `build/CMakeCache.txt`，使用 `--config RelWithDebInfo` 构建 `device_simulator` 和 `protocol_tests`。
-2. 运行 CTest 与 Catch2 协议回归；通过后再用同一连接复核 HELLO→START→STOP→START，确认状态机无回归。
-3. 本小步验收后，再单独设计 `cnt <= 1020`、低采样率余数累计、时间戳和发送背压，不提前发送 DATA。
+1. 实现不依赖 Winsock 的样本预算器：输入 `sample_rate` 和一个逻辑 tick，输出本 tick 样本总数、最多 1020 的分段列表及新的 credit。
+2. 增加自动化测试：10Hz 的五个 tick 才累计出 1 个样本；10001Hz 连续 50 tick 合计 10001；高采样率分段均不超过 1020且总数不丢失。
+3. 该纯计算小步验收后，再实现非阻塞有界发送队列；发送队列完成前不接入真实 DATA。
 
 ## 暂不开始
 

@@ -49,6 +49,10 @@ public:
 private:
     // 保持主机字节序，便于日志输出和构造函数参数传递。
     std::uint16_t port_;
+
+    // 采样率、通道使能位掩码
+    std::uint32_t sample_rate_;
+    std::uint16_t chan_mask_;
 };
 
 #endif // VIRTUALBENTH_WINSOCKRUNTIME_H

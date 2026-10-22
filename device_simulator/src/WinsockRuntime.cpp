@@ -475,6 +475,9 @@ bool TcpServer::run()
     constexpr std::chrono::milliseconds kDataTickInterval{20};
     std::chrono::steady_clock::time_point next_data_deadline{};
 
+    std::array<std::uint8_t, 8> data_seqs{};
+    std::uint32_t sample_credit = 0;
+
     while (true)
     {
         // select() 会改写传入集合，因此每轮都重新构造当前客户端的读集合。
@@ -488,6 +491,9 @@ bool TcpServer::run()
         timeval* timeout_ptr = nullptr;
         if (session_state == SessionState::Running)
         {
+            // 累加本次 tick 的配额并计算应发样本数
+            sample_credit = 0;
+
             const auto now = std::chrono::steady_clock::now();
             if (now >= next_data_deadline)
             {
@@ -496,6 +502,78 @@ bool TcpServer::run()
                 do
                 {
                     next_data_deadline += kDataTickInterval;
+
+                    // 每秒 50 个 tick
+                    sample_credit += sample_rate_;
+                    // 1 / 20 = 50Hz
+                    std::uint32_t total_due = sample_credit / 50;
+                    // 保留余数到下一个 tick
+                    sample_credit %= 50;
+                    // 本次 tick 不够一个完整样本，直接跳过
+                    if (total_due == 0)
+                    {
+                        continue;
+                    }
+
+                    // 获取当前时间的 Unix Epoch 微秒数
+                    const auto ts_now = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    const uint64_t ts = static_cast<uint64_t>(ts_now);
+
+                    // 处理超出单帧协议上限 (1020) 的拆分
+                    std::uint32_t remaining_due = total_due;
+                    while (remaining_due > 0)
+                    {
+                        // 本次分片最多取 1020 个样本
+                        const std::uint16_t current_cnt = static_cast<std::uint16_t>(std::min(remaining_due, 1020u));
+                        for (std::uint8_t chan_id = 0; chan_id < 8; ++chan_id)
+                        {
+                            if ((chan_mask_ & (1 << chan_id)) != 0)
+                            {
+                                Frame data_frame;
+                                data_frame.command = Command::Data;
+                                // 预留 payload 容量：15 字节固定字段 + (4 字节 * 样本数)
+                                data_frame.payload.reserve(15 + 4 * current_cnt);
+                                // 通道号
+                                data_frame.payload.push_back(chan_id);
+                                // 序列号
+                                data_frame.payload.push_back(static_cast<uint8_t>(data_seqs[chan_id] & 0xFF));
+                                data_frame.payload.push_back(static_cast<uint8_t>((data_seqs[chan_id] >> 8) & 0xFF));
+                                data_frame.payload.push_back(static_cast<uint8_t>((data_seqs[chan_id] >> 16) & 0xFF));
+                                data_frame.payload.push_back(static_cast<uint8_t>((data_seqs[chan_id] >> 24) & 0xFF));
+                                // 本批样本起始绝对时间，Unix Epoch 微秒（UTC）
+                                for (int i = 0; i < 8; ++i)
+                                {
+                                    data_frame.payload.push_back(static_cast<uint8_t>(ts >> (i * 8) & 0xFF));
+                                }
+                                // 本帧样本个数
+                                data_frame.payload.push_back(static_cast<uint8_t>(current_cnt & 0xFF));
+                                data_frame.payload.push_back(static_cast<uint8_t>((current_cnt >> 8) & 0xFF));
+                                // 采样数据 (4B * cnt) float32 小端序
+                                for (int i = 0; i < current_cnt; ++i)
+                                {
+                                    // 构造模拟数据
+                                    float sample = 1.0f;
+                                    uint32_t sample_bits;
+                                    std::memcpy(&sample_bits, &sample, sizeof(sample));
+                                    data_frame.payload.push_back(static_cast<uint8_t>(sample_bits & 0xFF));
+                                    data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 8) & 0xFF));
+                                    data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 16) & 0xFF));
+                                    data_frame.payload.push_back(static_cast<uint8_t>((sample_bits >> 24) & 0xFF));
+
+                                }
+                                // 调用 send_frame，由它完成打包与 TCP 发送
+                                if (!send_frame(client_socket.get(), data_frame))
+                                {
+                                    return false;
+                                }
+
+                                // 序列号递增规则：完整帧成功发送后才递增
+                                data_seqs[chan_id]++;
+                            }
+                        }
+                        remaining_due -= current_cnt;
+                    }
                 }
                 while (next_data_deadline <= now);
                 continue;
@@ -509,12 +587,14 @@ bool TcpServer::run()
         }
 
         const int ready = select(0, &readfds, nullptr, nullptr, timeout_ptr);
+
+        // select 失败，立即读取 `WSAGetLastError()`
         if (ready == SOCKET_ERROR)
         {
             report_winsock_error("select");
             return false;
         }
-
+        // select 等待超时，没有 Socket 就绪
         if (ready == 0)
         {
             // Running 的 DATA 截止时间到达。当前骨架不发送帧，只推进到下一个未来截止点；
@@ -527,7 +607,9 @@ bool TcpServer::run()
             while (next_data_deadline <= now);
             continue;
         }
+        // 三个集合中就绪 Socket 的总数
 
+        // 判断 readfds 中可读集合中是否有 client_socket
         if (!FD_ISSET(client_socket.get(), &readfds))
         {
             // 当前集合只有一个客户端；防御性保留，避免未来扩展集合时在未就绪
@@ -556,6 +638,7 @@ bool TcpServer::run()
         std::vector<std::uint8_t> chunk(static_cast<std::size_t>(bytes_read));
         std::memcpy(chunk.data(), receive_buffer.data(), chunk.size());
 
+        // 解析数据块
         const std::vector<Frame> frames = parser.feed(chunk);
         for (const Frame& frame : frames)
         {
@@ -581,6 +664,9 @@ bool TcpServer::run()
             if (state_before != SessionState::Running &&
                 session_state == SessionState::Running)
             {
+                sample_rate_ = static_cast<std::uint32_t>(frame.payload[0]) | static_cast<std::uint32_t>(frame.payload[1] << 8) |
+                    static_cast<std::uint32_t>(frame.payload[2] << 16) | static_cast<std::uint32_t>(frame.payload[3] << 24);
+                chan_mask_ = frame.payload[4];
                 next_data_deadline = std::chrono::steady_clock::now() + kDataTickInterval;
             }
 
