@@ -31,3 +31,14 @@ target_link_libraries(sample_budget_tests PRIVATE
 )
 
 add_test(NAME sample_budget_tests COMMAND sample_budget_tests)
+
+add_executable(outbound_queue_tests
+    test_outbound_queue.cpp
+)
+
+target_link_libraries(outbound_queue_tests PRIVATE
+    simulator_core
+    catch2_amalgamated
+)
+
+add_test(NAME outbound_queue_tests COMMAND outbound_queue_tests)

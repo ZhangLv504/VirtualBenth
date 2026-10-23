@@ -1,7 +1,11 @@
 # 不依赖 Winsock 的模拟器纯计算核心；Linux 也可以构建和测试。
 add_library(simulator_core STATIC
+    include/device_simulator/outbound_queue.h
     include/device_simulator/sample_budget.h
+    include/device_simulator/custom_queue.h
+    src/outbound_queue.cpp
     src/sample_budget.cpp
+    src/custom_queue.cpp
 )
 
 target_include_directories(simulator_core PUBLIC
