@@ -25,10 +25,11 @@ namespace
     // AwaitHello 在线上没有对应值，因此禁止直接 static_cast 后发送。
     enum class SessionState
     {
-        AwaitHello,
-        Ready,
-        Running,
-        Idle,
+        AwaitHello,     // 等待Hello
+        Ready,          // HELLO 成功，待命
+        Running,        // 采集中，持续推送 DATA
+        Idle,           // 空闲，未采样
+        Fault,          // 设备故障
     };
 
     // 当前 TCP 连接中一次采集会话的配置与逐通道序号。
@@ -57,12 +58,16 @@ namespace
     // “ACK 成功”“READY 状态”“错误类型”，而不是散落难以审查的裸十六进制数。
     // 0x00 表示 ACK 处理结果为 OK
     constexpr std::uint8_t kAckOk = 0x00;
+
     // 0x00 表示设备已完成握手、当前处于空闲且未采样状态
     constexpr std::uint8_t kStatusIdle = 0x00;
     // 0x01 表示设备状态为 READY，含义为 HELLO 成功，待命
     constexpr std::uint8_t kStatusReady = 0x01;
     // 0x02 表示设备正在采集中；当前里程碑只维护状态，尚不推送 DATA
     constexpr std::uint8_t kStatusRunning = 0x02;
+    // 0x03 表示设备故障
+    constexpr std::uint8_t kStatusFault = 0x03;
+
     // 0x0001 对应 UNKNOWN_CMD 错误码，表示收到未定义的 cmd
     constexpr std::uint16_t kErrorUnknownCommand = 0x0001;
     // 0x0002 对应 VER_MISMATCH 错误码，表示协议版本不一致
@@ -71,6 +76,7 @@ namespace
     constexpr std::uint16_t kErrorBadParameter = 0x0003;
     // 0x0004 对应 BAD_STATE 错误码，表示状态非法（如未启动就 STOP）
     constexpr std::uint16_t kErrorBadState = 0x0004;
+
     // 4096 对应协议规定的 payload 的最大合法字节数
     constexpr std::size_t kReceiveBufferSize = 4096;
 
@@ -206,6 +212,38 @@ namespace
         return send_frame(socket, make_error_frame(error_code));
     }
 
+    [[nodiscard]] bool send_ack(SOCKET socket, Command command)
+    {
+        Frame ack_frame;
+        ack_frame.command = Command::Ack;
+        ack_frame.payload = {static_cast<std::uint8_t>(command), kAckOk};
+        return send_frame(socket, ack_frame);
+    }
+
+    [[nodiscard]] bool send_status(SOCKET socket, const SessionState& session_state)
+    {
+        Frame status_frame;
+        status_frame.command = Command::Status;
+        if (session_state == SessionState::Ready)
+        {
+            status_frame.payload = {kStatusReady};
+        }
+        else if (session_state == SessionState::Running)
+        {
+            status_frame.payload = {kStatusRunning};
+        }
+        else if (session_state == SessionState::Idle)
+        {
+            status_frame.payload = {kStatusIdle};
+        }
+        else if (session_state == SessionState::Fault)
+        {
+            status_frame.payload = {kStatusFault};
+        }
+
+        return send_frame(socket, status_frame);
+    }
+
     // HELLO/START/STOP 成功时必须先发送 ACK，再发布该命令完成后的目标 STATUS。
     // 目标状态码由调用方显式传入，避免把包含 AwaitHello 的内部枚举误当成线上值。
     // 任一帧发送失败都返回 false；调用方只有在两帧全部发送成功后才提交内部状态。
@@ -214,18 +252,25 @@ namespace
         Command command,
         std::uint8_t target_status)
     {
-        Frame ack_frame;
-        ack_frame.command = Command::Ack;
-        ack_frame.payload = {static_cast<std::uint8_t>(command), kAckOk};
-        if (!send_frame(socket, ack_frame))
+        // Frame ack_frame;
+        // ack_frame.command = Command::Ack;
+        // ack_frame.payload = {static_cast<std::uint8_t>(command), kAckOk};
+        // if (!send_frame(socket, ack_frame))
+        // {
+        //     return false;
+        // }
+
+        // Frame status_frame;
+        // status_frame.command = Command::Status;
+        // status_frame.payload = {target_status};
+        // return send_frame(socket, status_frame);
+
+        if (!send_ack(socket, command))
         {
             return false;
         }
 
-        Frame status_frame;
-        status_frame.command = Command::Status;
-        status_frame.payload = {target_status};
-        return send_frame(socket, status_frame);
+        return send_status(socket, static_cast<SessionState>(target_status));
     }
 
 
@@ -344,20 +389,34 @@ namespace
 
         case Command::Data:
         case Command::Status:
+        {
+            return send_status(socket, session_state)
+                ? FrameAction::KeepConnection
+                : FrameAction::FatalError;
+        }
         case Command::Ack:
+        {
+            return send_ack(socket, frame.command)
+                ? FrameAction::KeepConnection
+                : FrameAction::FatalError;
+        }
         case Command::Error:
+        {
             // DATA/STATUS/ACK/ERROR 不应由 host 发给 device；这些已定义但方向
             // 不合法的帧使用 BAD_STATE，且保持当前连接与会话状态不变。
             return send_error(socket, kErrorBadState)
                 ? FrameAction::KeepConnection
                 : FrameAction::FatalError;
+        }
 
         case Command::Invalid:
         default:
+        {
             // 未定义的线上命令由业务层响应 UNKNOWN_CMD，连接保持可用。
             return send_error(socket, kErrorUnknownCommand)
                 ? FrameAction::KeepConnection
                 : FrameAction::FatalError;
+        }
         }
     }
 } // namespace
@@ -482,6 +541,11 @@ bool TcpServer::run()
         FD_ZERO(&readfds);
         FD_SET(client_socket.get(), &readfds);
 
+        fd_set writefds{};
+        FD_ZERO(&writefds);
+        FD_SET(client_socket.get(), &writefds);
+
+
         // 非 Running 状态没有 DATA 截止时间，可以一直等控制字节；
         // Running 状态则只等到最近的单调时钟截止点。timeval 必须活到 select() 返回。
         timeval timeout{};
@@ -508,7 +572,7 @@ bool TcpServer::run()
             timeout_ptr = &timeout;
         }
 
-        const int ready = select(0, &readfds, nullptr, nullptr, timeout_ptr);
+        const int ready = select(0, &readfds, &writefds, nullptr, timeout_ptr);
 
         // select 失败，立即读取 `WSAGetLastError()`
         if (ready == SOCKET_ERROR)

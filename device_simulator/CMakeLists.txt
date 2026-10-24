@@ -2,10 +2,8 @@
 add_library(simulator_core STATIC
     include/device_simulator/outbound_queue.h
     include/device_simulator/sample_budget.h
-    include/device_simulator/custom_queue.h
     src/outbound_queue.cpp
     src/sample_budget.cpp
-    src/custom_queue.cpp
 )
 
 target_include_directories(simulator_core PUBLIC
