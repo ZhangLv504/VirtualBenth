@@ -7,6 +7,7 @@
 #include "protocol/frame.h"
 #include "protocol/protocol_codec.h"
 #include "protocol/stream_parser.h"
+#include "device_simulator/outbound_queue.h"
 
 #include <algorithm>
 #include <array>
@@ -14,9 +15,12 @@
 #include <climits>
 #include <cstddef>
 #include <cstring>
+#include <deque>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -29,7 +33,6 @@ namespace
         Ready,          // HELLO 成功，待命
         Running,        // 采集中，持续推送 DATA
         Idle,           // 空闲，未采样
-        Fault,          // 设备故障
     };
 
     // 当前 TCP 连接中一次采集会话的配置与逐通道序号。
@@ -65,9 +68,6 @@ namespace
     constexpr std::uint8_t kStatusReady = 0x01;
     // 0x02 表示设备正在采集中；当前里程碑只维护状态，尚不推送 DATA
     constexpr std::uint8_t kStatusRunning = 0x02;
-    // 0x03 表示设备故障
-    constexpr std::uint8_t kStatusFault = 0x03;
-
     // 0x0001 对应 UNKNOWN_CMD 错误码，表示收到未定义的 cmd
     constexpr std::uint16_t kErrorUnknownCommand = 0x0001;
     // 0x0002 对应 VER_MISMATCH 错误码，表示协议版本不一致
@@ -130,9 +130,26 @@ namespace
 
     enum class FrameAction
     {
-        KeepConnection,  // 当前帧已处理，可继续接收后续帧
-        CloseConnection, // 已按协议发送响应，当前连接必须关闭
-        FatalError,      // 编码或网络发送失败，无法可靠继续会话
+        KeepConnection, // 当前帧响应已入队，可继续当前连接
+        CloseAfterFlush, // 响应全部发送后关闭当前连接
+        FatalError,     // 编码或响应入队失败，无法可靠继续会话
+    };
+
+    enum class SamplingUpdate
+    {
+        None,
+        Start,
+        Reset,
+    };
+
+    // 成功控制命令的状态变更不能在响应刚入队时提交。只有 ACK 与 STATUS 的
+    // 全部字节都被 send() 接受后，事件循环才应用这里保存的待提交变更。
+    struct PendingTransition
+    {
+        SessionState target_state{SessionState::AwaitHello};
+        SamplingUpdate sampling_update{SamplingUpdate::None};
+        std::uint32_t sample_rate{0};
+        std::uint8_t channel_mask{0};
     };
 
     // 除 WSAStartup() 外，多数 Winsock API 用特殊返回值报告失败，再通过
@@ -142,46 +159,16 @@ namespace
         std::cerr << operation << " failed, WSA error=" << WSAGetLastError() << '\n';
     }
 
-    // 把一帧编码后的全部字节提交给 TCP。
-    //
-    // TCP 是字节流；一次 send() 成功只代表返回值数量的字节已被接受，不保证
-    // 整个 vector 一次发完。因此循环维护 total_sent，并从尚未发送的位置继续。
-    // Winsock 的长度参数是 int，所以即使当前协议帧最多只有 4104B，也保留
-    // INT_MAX 分块边界，防止以后复用函数时发生 size_t 到 int 的危险窄化。
-    [[nodiscard]] bool send_all(SOCKET socket, const std::vector<std::uint8_t>& bytes)
+    void report_winsock_error(const char* operation, int error_code)
     {
-        std::size_t total_sent = 0;
-        while (total_sent < bytes.size())
-        {
-            const std::size_t remaining = bytes.size() - total_sent;
-            const int request_size = static_cast<int>(std::min(remaining, static_cast<std::size_t>(INT_MAX)));
-            // vector<uint8_t> 保存原始字节；send() 的历史接口要求 const char*。
-            const char* current = reinterpret_cast<const char*>(bytes.data() + total_sent);
-
-            const int sent = send(socket, current, request_size, 0);
-            if (sent == SOCKET_ERROR)
-            {
-                report_winsock_error("send");
-                return false;
-            }
-            if (sent == 0)
-            {
-                // 对非空请求没有取得进展时继续循环会永久空转，因此把会话视为失败。
-                std::cerr << "send made no progress; closing the client connection\n";
-                return false;
-            }
-
-            total_sent += static_cast<std::size_t>(sent);
-        }
-
-        return true;
+        std::cerr << operation << " failed, WSA error=" << error_code << '\n';
     }
 
-    // 网络层只发送完整协议帧：先由 ProtocolCodec 负责布局、长度和 CRC，再由
-    // send_all() 处理 TCP 部分发送。编码失败时绝不能发送空或半成品缓冲区。
-    [[nodiscard]] bool send_frame(SOCKET socket, const Frame& frame)
+    [[nodiscard]] bool encode_frame(
+        const Frame& frame,
+        std::vector<std::uint8_t>& bytes)
     {
-        const EncodeResult encoded = ProtocolCodec::encode(frame);
+        EncodeResult encoded = ProtocolCodec::encode(frame);
         if (!encoded.ok())
         {
             std::cerr << "ProtocolCodec::encode failed, error="
@@ -189,7 +176,8 @@ namespace
             return false;
         }
 
-        return send_all(socket, encoded.bytes);
+        bytes = std::move(encoded.bytes);
+        return true;
     }
 
     // 构造不带文本描述的最小 ERROR 帧。Frame 默认使用本端支持的协议版本，
@@ -206,87 +194,97 @@ namespace
         return error_frame;
     }
 
-    // ERROR 的构造与发送集中在一个入口，避免各业务分支重复端序处理。
-    [[nodiscard]] bool send_error(SOCKET socket, std::uint16_t error_code)
-    {
-        return send_frame(socket, make_error_frame(error_code));
-    }
-
-    [[nodiscard]] bool send_ack(SOCKET socket, Command command)
+    [[nodiscard]] Frame make_ack_frame(Command command)
     {
         Frame ack_frame;
         ack_frame.command = Command::Ack;
         ack_frame.payload = {static_cast<std::uint8_t>(command), kAckOk};
-        return send_frame(socket, ack_frame);
+        return ack_frame;
     }
 
-    [[nodiscard]] bool send_status(SOCKET socket, const SessionState& session_state)
+    [[nodiscard]] Frame make_status_frame(std::uint8_t status)
     {
         Frame status_frame;
         status_frame.command = Command::Status;
-        if (session_state == SessionState::Ready)
-        {
-            status_frame.payload = {kStatusReady};
-        }
-        else if (session_state == SessionState::Running)
-        {
-            status_frame.payload = {kStatusRunning};
-        }
-        else if (session_state == SessionState::Idle)
-        {
-            status_frame.payload = {kStatusIdle};
-        }
-        else if (session_state == SessionState::Fault)
-        {
-            status_frame.payload = {kStatusFault};
-        }
-
-        return send_frame(socket, status_frame);
+        status_frame.payload = {status};
+        return status_frame;
     }
 
-    // HELLO/START/STOP 成功时必须先发送 ACK，再发布该命令完成后的目标 STATUS。
-    // 目标状态码由调用方显式传入，避免把包含 AwaitHello 的内部枚举误当成线上值。
-    // 任一帧发送失败都返回 false；调用方只有在两帧全部发送成功后才提交内部状态。
-    [[nodiscard]] bool send_success(
-        SOCKET socket,
+    [[nodiscard]] bool ensure_control_capacity(
+        OutboundQueue& outbound_queue,
+        std::size_t required_bytes)
+    {
+        if (required_bytes > outbound_queue.capacity_bytes())
+        {
+            return false;
+        }
+        if (required_bytes >
+            outbound_queue.capacity_bytes() - outbound_queue.queued_bytes())
+        {
+            outbound_queue.discard_unsent_data();
+        }
+        return required_bytes <=
+            outbound_queue.capacity_bytes() - outbound_queue.queued_bytes();
+    }
+
+    [[nodiscard]] bool enqueue_control_frame(
+        OutboundQueue& outbound_queue,
+        const Frame& frame)
+    {
+        std::vector<std::uint8_t> encoded;
+        if (!encode_frame(frame, encoded))
+        {
+            return false;
+        }
+        return outbound_queue.enqueue_control(std::move(encoded));
+    }
+
+    // ERROR 只要成功进入控制队列即可；实际发送和部分发送进度由事件循环维护。
+    [[nodiscard]] bool enqueue_error(
+        OutboundQueue& outbound_queue,
+        std::uint16_t error_code)
+    {
+        return enqueue_control_frame(outbound_queue, make_error_frame(error_code));
+    }
+
+    // ACK 与 STATUS 必须作为一个原子响应批次预留容量，避免只排入 ACK 后因容量
+    // 不足丢失 STATUS。当前没有 DATA，但该规则也为后续 STOP 清队列保留正确边界。
+    [[nodiscard]] bool enqueue_success(
+        OutboundQueue& outbound_queue,
         Command command,
         std::uint8_t target_status)
     {
-        // Frame ack_frame;
-        // ack_frame.command = Command::Ack;
-        // ack_frame.payload = {static_cast<std::uint8_t>(command), kAckOk};
-        // if (!send_frame(socket, ack_frame))
-        // {
-        //     return false;
-        // }
-
-        // Frame status_frame;
-        // status_frame.command = Command::Status;
-        // status_frame.payload = {target_status};
-        // return send_frame(socket, status_frame);
-
-        if (!send_ack(socket, command))
+        std::vector<std::uint8_t> ack_bytes;
+        std::vector<std::uint8_t> status_bytes;
+        if (!encode_frame(make_ack_frame(command), ack_bytes) ||
+            !encode_frame(make_status_frame(target_status), status_bytes))
         {
             return false;
         }
 
-        return send_status(socket, static_cast<SessionState>(target_status));
-    }
+        const std::size_t required_bytes = ack_bytes.size() + status_bytes.size();
+        if (!ensure_control_capacity(outbound_queue, required_bytes))
+        {
+            return false;
+        }
 
+        return outbound_queue.enqueue_control(std::move(ack_bytes)) &&
+            outbound_queue.enqueue_control(std::move(status_bytes));
+    }
 
     // 对 StreamParser 已验证过结构和 CRC 的完整帧执行业务语义检查。
     // 返回 FrameAction 而不是在此直接关闭 Socket，让连接循环统一决定生命周期。
     [[nodiscard]] FrameAction process_frame(
-        SOCKET socket,
+        OutboundQueue& outbound_queue,
         const Frame& frame,
-        SessionState& session_state,
-        SamplingContext& sampling_context)
+        SessionState session_state,
+        std::optional<PendingTransition>& pending_transition)
     {
         // decode 会保留 CRC 正确帧的原始版本；版本不匹配是业务错误，而非流同步错误。
         if (frame.version != kProtocolVersion)
         {
-            return send_error(socket, kErrorVersionMismatch)
-                ? FrameAction::CloseConnection
+            return enqueue_error(outbound_queue, kErrorVersionMismatch)
+                ? FrameAction::CloseAfterFlush
                 : FrameAction::FatalError;
         }
 
@@ -297,7 +295,7 @@ namespace
             // V1 HELLO 的版本只存在于帧头中，payload 必须严格为空。
             if (!frame.payload.empty())
             {
-                return send_error(socket, kErrorBadParameter)
+                return enqueue_error(outbound_queue, kErrorBadParameter)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
@@ -306,14 +304,15 @@ namespace
             // BAD_STATE，但协议规定该错误不关闭连接，也不能改变当前状态。
             if (session_state != SessionState::AwaitHello)
             {
-                return send_error(socket, kErrorBadState)
+                return enqueue_error(outbound_queue, kErrorBadState)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
 
-            if (send_success(socket, frame.command, kStatusReady))
+            if (enqueue_success(outbound_queue, frame.command, kStatusReady))
             {
-                session_state = SessionState::Ready;
+                pending_transition = PendingTransition{
+                    SessionState::Ready, SamplingUpdate::None, 0, 0};
                 return FrameAction::KeepConnection;
             }
             return FrameAction::FatalError;
@@ -323,7 +322,7 @@ namespace
         {
             if (frame.payload.size() != 5)
             {
-                return send_error(socket, kErrorBadParameter)
+                return enqueue_error(outbound_queue, kErrorBadParameter)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
@@ -337,7 +336,7 @@ namespace
             const std::uint8_t channel_mask = frame.payload[4];
             if (sample_rate == 0 || channel_mask == 0)
             {
-                return send_error(socket, kErrorBadParameter)
+                return enqueue_error(outbound_queue, kErrorBadParameter)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
@@ -345,17 +344,18 @@ namespace
             if (session_state != SessionState::Ready &&
                 session_state != SessionState::Idle)
             {
-                return send_error(socket, kErrorBadState)
+                return enqueue_error(outbound_queue, kErrorBadState)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
 
-            if (send_success(socket, frame.command, kStatusRunning))
+            if (enqueue_success(outbound_queue, frame.command, kStatusRunning))
             {
-                // 只有 ACK 与 RUNNING STATUS 都发送成功后，才同时提交状态与采样配置。
-                // 再次 START 会从新的采集会话开始，因此所有通道序号重新归零。
-                sampling_context.start(sample_rate, channel_mask);
-                session_state = SessionState::Running;
+                pending_transition = PendingTransition{
+                    SessionState::Running,
+                    SamplingUpdate::Start,
+                    sample_rate,
+                    channel_mask};
                 return FrameAction::KeepConnection;
             }
             return FrameAction::FatalError;
@@ -365,23 +365,22 @@ namespace
         {
             if (!frame.payload.empty())
             {
-                return send_error(socket, kErrorBadParameter)
+                return enqueue_error(outbound_queue, kErrorBadParameter)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
 
             if (session_state != SessionState::Running)
             {
-                return send_error(socket, kErrorBadState)
+                return enqueue_error(outbound_queue, kErrorBadState)
                     ? FrameAction::KeepConnection
                     : FrameAction::FatalError;
             }
 
-            if (send_success(socket, frame.command, kStatusIdle))
+            if (enqueue_success(outbound_queue, frame.command, kStatusIdle))
             {
-                // STOP 成功后不再保留上一采集会话的配置与序号。
-                sampling_context.reset();
-                session_state = SessionState::Idle;
+                pending_transition = PendingTransition{
+                    SessionState::Idle, SamplingUpdate::Reset, 0, 0};
                 return FrameAction::KeepConnection;
             }
             return FrameAction::FatalError;
@@ -389,22 +388,12 @@ namespace
 
         case Command::Data:
         case Command::Status:
-        {
-            return send_status(socket, session_state)
-                ? FrameAction::KeepConnection
-                : FrameAction::FatalError;
-        }
         case Command::Ack:
-        {
-            return send_ack(socket, frame.command)
-                ? FrameAction::KeepConnection
-                : FrameAction::FatalError;
-        }
         case Command::Error:
         {
             // DATA/STATUS/ACK/ERROR 不应由 host 发给 device；这些已定义但方向
             // 不合法的帧使用 BAD_STATE，且保持当前连接与会话状态不变。
-            return send_error(socket, kErrorBadState)
+            return enqueue_error(outbound_queue, kErrorBadState)
                 ? FrameAction::KeepConnection
                 : FrameAction::FatalError;
         }
@@ -413,7 +402,7 @@ namespace
         default:
         {
             // 未定义的线上命令由业务层响应 UNKNOWN_CMD，连接保持可用。
-            return send_error(socket, kErrorUnknownCommand)
+            return enqueue_error(outbound_queue, kErrorUnknownCommand)
                 ? FrameAction::KeepConnection
                 : FrameAction::FatalError;
         }
@@ -517,6 +506,16 @@ bool TcpServer::run()
         return false;
     }
 
+    // accept() 继承的是阻塞语义。连续 DATA 前必须让当前客户端 Socket 非阻塞，
+    // 这样 send()/recv() 即使在 select() 返回后遇到竞争，也只会报告
+    // WSAEWOULDBLOCK，而不会卡住整个控制事件循环。
+    u_long nonblocking = 1;
+    if (ioctlsocket(client_socket.get(), FIONBIO, &nonblocking) == SOCKET_ERROR)
+    {
+        report_winsock_error("ioctlsocket(FIONBIO)");
+        return false;
+    }
+
     // 当前服务器状态
     SessionState session_state{SessionState::AwaitHello};
     SamplingContext sampling_context{};
@@ -528,6 +527,10 @@ bool TcpServer::run()
     // 连接结束时销毁解析器，避免残留字节污染未来连接。
     StreamParser parser;
     std::array<char, kReceiveBufferSize> receive_buffer{};
+    OutboundQueue outbound_queue;
+    std::deque<Frame> pending_frames;
+    std::optional<PendingTransition> pending_transition;
+    bool close_after_flush = false;
 
     // 当前小步只搭建 DATA 节拍唤醒骨架，不生成真实 DATA。20ms 是临时周期；
     // 后续会根据 START.sample_rate 与每帧 cnt 计算真实截止时间。
@@ -536,15 +539,80 @@ bool TcpServer::run()
 
     while (true)
     {
-        // select() 会改写传入集合，因此每轮都重新构造当前客户端的读集合。
+        // 一个输入帧的响应全部发送完成后，才提交它对应的业务状态。随后才处理
+        // 下一输入帧，避免同一次 recv() 中的合包命令越过尚未完成的状态转换。
+        if (outbound_queue.empty())
+        {
+            if (pending_transition.has_value())
+            {
+                const PendingTransition transition = *pending_transition;
+                if (transition.sampling_update == SamplingUpdate::Start)
+                {
+                    sampling_context.start(
+                        transition.sample_rate, transition.channel_mask);
+                }
+                else if (transition.sampling_update == SamplingUpdate::Reset)
+                {
+                    sampling_context.reset();
+                }
+
+                const SessionState previous_state = session_state;
+                session_state = transition.target_state;
+                pending_transition.reset();
+
+                if (previous_state != SessionState::Running &&
+                    session_state == SessionState::Running)
+                {
+                    next_data_deadline =
+                        std::chrono::steady_clock::now() + kDataTickInterval;
+                }
+            }
+
+            if (close_after_flush)
+            {
+                std::cout << "Closing client connection as required by the protocol\n";
+                return true;
+            }
+
+            if (!pending_frames.empty())
+            {
+                Frame frame = std::move(pending_frames.front());
+                pending_frames.pop_front();
+                std::cout << "Processing complete frame CMD: "
+                          << static_cast<int>(frame.command) << '\n';
+
+                const FrameAction action = process_frame(
+                    outbound_queue, frame, session_state, pending_transition);
+                if (action == FrameAction::FatalError)
+                {
+                    return false;
+                }
+                if (action == FrameAction::CloseAfterFlush)
+                {
+                    close_after_flush = true;
+                }
+            }
+        }
+
+        // select() 会改写传入集合，因此每轮都重新构造集合。协议要求关闭连接时
+        // 只排空已入队错误响应，不再读取新的输入。
         fd_set readfds{};
         FD_ZERO(&readfds);
-        FD_SET(client_socket.get(), &readfds);
+        fd_set* readfds_ptr = nullptr;
+        if (!close_after_flush)
+        {
+            FD_SET(client_socket.get(), &readfds);
+            readfds_ptr = &readfds;
+        }
 
         fd_set writefds{};
         FD_ZERO(&writefds);
-        FD_SET(client_socket.get(), &writefds);
-
+        fd_set* writefds_ptr = nullptr;
+        if (!outbound_queue.empty())
+        {
+            FD_SET(client_socket.get(), &writefds);
+            writefds_ptr = &writefds;
+        }
 
         // 非 Running 状态没有 DATA 截止时间，可以一直等控制字节；
         // Running 状态则只等到最近的单调时钟截止点。timeval 必须活到 select() 返回。
@@ -572,7 +640,8 @@ bool TcpServer::run()
             timeout_ptr = &timeout;
         }
 
-        const int ready = select(0, &readfds, &writefds, nullptr, timeout_ptr);
+        const int ready = select(
+            0, readfds_ptr, writefds_ptr, nullptr, timeout_ptr);
 
         // select 失败，立即读取 `WSAGetLastError()`
         if (ready == SOCKET_ERROR)
@@ -593,68 +662,86 @@ bool TcpServer::run()
             while (next_data_deadline <= now);
             continue;
         }
-        // 三个集合中就绪 Socket 的总数
-
-        // 判断 readfds 中可读集合中是否有 client_socket
-        if (!FD_ISSET(client_socket.get(), &readfds))
+        // 读事件优先处理，使 STOP 等控制输入不会被持续可写事件推迟。
+        if (readfds_ptr != nullptr &&
+            FD_ISSET(client_socket.get(), &readfds))
         {
-            // 当前集合只有一个客户端；防御性保留，避免未来扩展集合时在未就绪
-            // Socket 上调用阻塞 recv()。
-            continue;
-        }
+            // 非阻塞 Socket 在 select() 后仍可能因竞争返回 WSAEWOULDBLOCK；这不是
+            // 会话失败，保留所有状态并等待下一轮可读通知即可。
+            const int bytes_read = recv(
+                client_socket.get(),
+                receive_buffer.data(),
+                static_cast<int>(receive_buffer.size()),
+                0);
 
-        // select() 已确认当前 Socket 可读；recv() 仍需区分数据、正常关闭和错误。
-        const int bytes_read = recv(
-            client_socket.get(),
-            receive_buffer.data(),
-            static_cast<int>(receive_buffer.size()),
-            0);
-
-        if (bytes_read == 0)
-        {
-            std::cout << "Client disconnected normally\n";
-            return true;
-        }
-        if (bytes_read == SOCKET_ERROR)
-        {
-            report_winsock_error("recv");
-            return false;
-        }
-
-        std::vector<std::uint8_t> chunk(static_cast<std::size_t>(bytes_read));
-        std::memcpy(chunk.data(), receive_buffer.data(), chunk.size());
-
-        // 解析数据块
-        const std::vector<Frame> frames = parser.feed(chunk);
-        for (const Frame& frame : frames)
-        {
-            std::cout << "Received complete frame CMD: "
-                      << static_cast<int>(frame.command) << '\n';
-
-            const SessionState state_before = session_state;
-            const FrameAction action = process_frame(
-                client_socket.get(), frame, session_state, sampling_context
-                );
-            if (action == FrameAction::FatalError)
+            if (bytes_read == 0)
             {
-                return false;
-            }
-            if (action == FrameAction::CloseConnection)
-            {
-                std::cout << "Closing client connection as required by the protocol\n";
+                std::cout << "Client disconnected normally\n";
                 return true;
             }
-
-            // 只有成功 START 才会把状态从 Ready/Idle 改为 Running；此时 ACK 与
-            // STATUS 已发送成功，随后才能启动首个 DATA 截止时间。
-            if (state_before != SessionState::Running &&
-                session_state == SessionState::Running)
+            if (bytes_read == SOCKET_ERROR)
             {
-                next_data_deadline = std::chrono::steady_clock::now() + kDataTickInterval;
+                const int error_code = WSAGetLastError();
+                if (error_code != WSAEWOULDBLOCK)
+                {
+                    report_winsock_error("recv", error_code);
+                    return false;
+                }
+            }
+            else
+            {
+                std::vector<std::uint8_t> chunk(
+                    static_cast<std::size_t>(bytes_read));
+                std::memcpy(chunk.data(), receive_buffer.data(), chunk.size());
+
+                std::vector<Frame> frames = parser.feed(chunk);
+                for (Frame& frame : frames)
+                {
+                    std::cout << "Received complete frame CMD: "
+                              << static_cast<int>(frame.command) << '\n';
+                    pending_frames.push_back(std::move(frame));
+                }
+            }
+        }
+
+        // 仅当本轮 select() 实际监听且报告可写时发送一次。一次 send() 的返回值
+        // 交给 OutboundQueue 保存偏移；WSAEWOULDBLOCK 不丢帧也不忙等。
+        if (writefds_ptr != nullptr &&
+            FD_ISSET(client_socket.get(), &writefds))
+        {
+            const std::optional<OutboundChunk> chunk = outbound_queue.front();
+            if (!chunk.has_value() || chunk->size == 0)
+            {
+                std::cerr << "outbound queue returned an invalid writable chunk\n";
+                return false;
             }
 
-            // STOP 成功后状态已经离开 Running。旧截止点可以保留但不再参与
-            // select()；下一次 START 会重新建立新的采集节拍起点。
+            const int request_size = static_cast<int>(std::min(
+                chunk->size, static_cast<std::size_t>(INT_MAX)));
+            const int sent = send(
+                client_socket.get(),
+                reinterpret_cast<const char*>(chunk->data),
+                request_size,
+                0);
+
+            if (sent == SOCKET_ERROR)
+            {
+                const int error_code = WSAGetLastError();
+                if (error_code != WSAEWOULDBLOCK)
+                {
+                    report_winsock_error("send", error_code);
+                    return false;
+                }
+            }
+            else if (sent == 0)
+            {
+                std::cerr << "send made no progress; closing the client connection\n";
+                return false;
+            }
+            else
+            {
+                outbound_queue.consume(static_cast<std::size_t>(sent));
+            }
         }
     }
 }

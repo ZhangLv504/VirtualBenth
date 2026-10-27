@@ -1,14 +1,14 @@
 # VirtualBenth 项目进度
 
-> 最近核对：2026-10-22（Asia/Shanghai）
+> 最近核对：2026-10-24（Asia/Shanghai）
 > 用途：给当前与新会话提供动态交接。开始工作时仍须核对 Git、实际文件和最新测试输出。
 
 ## 当前阶段
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget` 和不依赖 Socket 的 64KiB `OutboundQueue` 均已完成实现并通过默认环境自动化测试。队列已验证控制帧优先、部分发送不可插队、DATA 容量拒绝、完整帧出队和未发送 DATA 清理；当前 Socket 仍为阻塞模式，尚不生成或发送 DATA。
-- 当前唯一目标：把现有 ACK/STATUS/ERROR 控制响应接入非阻塞 Socket 与 `select()` 的 `writefds`，验证 `WSAEWOULDBLOCK` 和部分发送不会破坏控制状态提交；本小步仍不生成 DATA。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget` 和 64KiB `OutboundQueue` 已有默认环境验收。最新提交 `a2db9a9` 对非阻塞发送的接入不完整且破坏 STOP/非法方向响应；工作区已直接修正为非阻塞客户端 Socket、按需 `writefds`、队列部分发送和响应排空后状态提交，但这些修正尚未构建、测试或 TCP 联调。当前仍不生成 DATA。
+- 当前唯一目标：在默认 VS2022 + `RelWithDebInfo` 环境构建修正后的非阻塞控制响应路径，运行全部自动化回归；通过后再用同一 TCP 连接复验 HELLO→START→STOP 及非法方向命令。未经这些证据，不开始真实 DATA。
 
 ## 默认构建环境
 
@@ -87,20 +87,21 @@
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
 - 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建、协议回归和真实 TCP 控制路径联调；当前 tick 只推进截止时间，不生成或发送 DATA。
 - 连接局部 `SamplingContext` 已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。由于当前尚不发送 DATA，采样率值、通道掩码内容和序号清零仍没有线上可观察数据，后续 DATA 首帧测试需继续覆盖这些内部结果。
+- 工作区已把接受到的客户端 Socket 切换为非阻塞模式，只在 `OutboundQueue` 非空时监听 `writefds`；每次可写只调用一次 `send()`，用真实返回值推进部分发送偏移，并把 `WSAEWOULDBLOCK` 视为可重试状态。ACK+STATUS 全部排空后才提交会话状态和采样上下文；版本不匹配的 ERROR 排空后再关闭。该实现已通过静态复审和 `git diff --check`，尚未获得构建、测试或联调证据。
 
 ## 待处理/已知问题
 
 - 旧 VS2019 + Ninja 构建树在助手环境持续报 MSVC `C1902`，原因指向 14.29 PDB 工具组件版本不一致；该问题保留为历史环境记录，但 VS2019 已不再是当前默认门槛，不阻断后续主线。
 - 已验收的 `ed18169` 基线是单客户端、单次 `accept()`；`d68a768` 已改成多客户端循环，但该扩展不属于当前阶段且存在下列静态阻断项，不能视为已验收能力。
-- `send_all()` 的部分发送分支和各 Winsock 失败清理路径已有代码审查与构建证据，但尚未通过故障注入强制触发。
+- 非阻塞 `send()` 的部分发送和 `WSAEWOULDBLOCK` 分支已在工作区实现，但尚未通过自动化故障注入强制触发；当前只能依赖静态审查，不能宣称这些分支已实测。
 - 当前 20ms DATA tick 和 `SampleBudget` 只完成调度与样本数量计算，不代表已经实现协议 DATA；START 的采样率/通道掩码及独立序号状态已在工作区保存，但尚未生成 `chanId/seq/ts/cnt/samples`、UTC 时间戳或波形数据。
-- 64KiB `OutboundQueue` 纯核心已通过测试，但尚未接入 `WinsockRuntime`；单客户端仍使用阻塞式 `send_all()`。正式连续 DATA 推流前必须先完成非阻塞 Socket、`writefds` 与部分发送集成，不能把纯队列测试外推为网络背压已解决。
+- 64KiB `OutboundQueue` 纯核心已经通过测试，工作区也已接入 `WinsockRuntime`，但网络集成尚未构建和联调；正式连续 DATA 推流前仍须证明非阻塞控制响应字节与旧协议完全一致，并确认空队列不会因 `writefds` 忙循环。
 - `Doc/项目规划V3.1.md` 第 2.4 节仍把 DATA 的 `ts` 描述为“模拟器启动后的单调时间”，与权威 `Doc/协议文档.md` 的“UTC Unix Epoch 微秒”冲突。按仓库优先级，线上 DATA 必须使用 UTC Epoch；`steady_clock` 仅用于本机节拍和超时。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-10-22 本轮开始时本地 `main`、`origin/main` 与 `HEAD 848f666` 一致且工作区干净；该提交已包含上一轮通过验收的独立 `SampleBudget`。本轮新增 `OutboundQueue` 纯核心及专用测试，未修改 `WinsockRuntime`，未提交、未推送。
+- 2026-10-24 核对时本地 `main`、`origin/main` 与 `HEAD a2db9a9` 一致且工作区干净。静态审查发现该提交没有切换非阻塞模式、没有使用 `OutboundQueue`，却无条件监听 `writefds`，并错误映射 STOP STATUS 和非法方向命令。工作区已直接修正 `WinsockRuntime.cpp/.h`；本轮未提交、未推送。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -156,12 +157,14 @@
 40. 2026-10-22 静态审查最新提交 `0d56a91`：发现 `sample_credit` 在每轮 Running 循环中清零，无法保存跨 tick 余数；正常 `select()` 超时路径不生成 DATA；同时提前使用阻塞式 `send_all()`、未初始化的服务器采样字段和 8 位序号，超出已冻结的小步边界。按用户既有授权直接撤回这些 DATA/Socket 改动，保留用户的事件循环注释，并新增独立 `simulator_core`、`SampleBudget` 和自动化测试。
 41. 2026-10-22 默认环境重新构建 `device_simulator`、`protocol_tests`、`sample_budget_tests` 成功，0 警告、0 错误；CTest 2/2 通过，两个测试程序分别为 36 个用例/268 个断言和 4 个用例/68 个断言全部通过；`git diff --check` 无错误。纯计算样本预算器小步完成，真实 DATA 仍未接入。
 42. 2026-10-22 实现不依赖 Socket 的 `OutboundQueue`：默认容量 64KiB，控制帧可越过未开始的 DATA，已部分发送的帧必须补齐，DATA 容量不足时无副作用地拒绝，控制帧容量不足时可清除未开始 DATA，完整帧发送后才释放容量。新增 6 个自动化用例和 51 个断言；默认环境四目标构建 0 警告、0 错误，CTest 3/3 及全部直接测试通过，`git diff --check` 无错误。本轮未修改网络运行时，真实 DATA 仍未接入。
+43. 2026-10-24 静态审查提交 `a2db9a9`：客户端未调用 `ioctlsocket(FIONBIO)`，响应仍全部走阻塞式 `send_all()`，`OutboundQueue` 未接入；`writefds` 却每轮无条件监听，使通常可写的 TCP Socket 导致 `select()` 立即返回并在不可读分支忙循环。另发现 STOP 的线上状态 `0x00` 被强转为内部 `AwaitHello`，产生空 STATUS payload；host 发 DATA/STATUS/ACK 时也被错误回复为 STATUS/ACK，而非 `BAD_STATE`。该提交静态审查不通过。
+44. 2026-10-24 按用户既有授权直接修正：接受连接后切为非阻塞模式；ACK/STATUS/ERROR 编码后进入 `OutboundQueue`；队列非空才监听 `writefds`；一次可写只发送一次并保存偏移；`WSAEWOULDBLOCK` 保持状态；成功命令的状态和采样上下文延迟到完整响应排空后提交；恢复非法方向命令统一 `BAD_STATE`，版本错误响应排空后关闭。静态复审与 `git diff --check` 通过，本轮未运行构建、测试或 TCP 联调。
 
 ## 下一步流程
 
-1. 接受客户端后用 `ioctlsocket(FIONBIO)` 切换为非阻塞模式；事件循环只在 `OutboundQueue` 非空时把客户端加入 `writefds`，并始终先处理 `readfds`。
-2. 把现有 ACK/STATUS/ERROR 编码后排入控制队列；可写时只调用一次 `send()`，把实际字节数交给 `consume()`，把 `WSAEWOULDBLOCK` 视为等待下一轮而不是致命错误。
-3. 先完成构建、自动化回归和现有 HELLO→START→STOP 联调；控制响应路径验收后，下一小步才接入真实 DATA 生成。
+1. 核对 `build/CMakeCache.txt` 后，用 `cmake --build build --config RelWithDebInfo --target device_simulator protocol_tests sample_budget_tests outbound_queue_tests --verbose` 构建全部相关目标。
+2. 运行 CTest 和三个测试程序，确认协议、样本预算、发送队列均无回归；若构建或测试失败，先修正本小步，不进入联调。
+3. 自动化回归通过后，用同一真实 TCP 连接复验 HELLO→START→STOP、非法 DATA/STATUS/ACK→BAD_STATE 和错误后连接保持；完成前不接入真实 DATA。
 
 ## 暂不开始
 

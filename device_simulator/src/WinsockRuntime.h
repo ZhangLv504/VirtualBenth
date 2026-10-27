@@ -29,18 +29,20 @@ public:
     WinsockRuntime& operator=(WinsockRuntime&&) = delete;
 };
 
-// S7 的单客户端 TCP 服务端与 DATA 节拍事件循环骨架。
+// S7 的单客户端 TCP 服务端与非阻塞发送事件循环骨架。
 //
 // 当前边界刻意保持简单：绑定本机 loopback、只接受一个客户端，并在当前线程
-// 通过 select() 同时等待控制字节和 Running 状态下的下一 DATA 截止时间。
-// 当前只搭建 tick 骨架，尚不生成 DATA；多客户端循环属于后续阶段。
+// 通过 select() 同时等待控制字节、待发控制响应和 Running 状态下的下一 DATA
+// 截止时间。当前只把 ACK/STATUS/ERROR 接入有界发送队列，尚不生成 DATA；
+// 多客户端循环属于后续阶段。
 class TcpServer final
 {
 public:
     // port 使用主机字节序保存；填充 sockaddr_in 时再通过 htons() 转为网络字节序。
     explicit TcpServer(std::uint16_t port = 12345) noexcept;
 
-    // 依次完成 socket → bind → listen → accept → select → recv/process/send。
+    // 依次完成 socket → bind → listen → accept → nonblocking → select →
+    // recv/process/queued-send。
     // 返回 true：客户端正常断开，或服务端已按协议发送错误并主动关闭连接。
     // 返回 false：Winsock API、协议编码或响应发送失败。
     // 本函数为阻塞调用，直到当前唯一客户端会话结束才返回。
