@@ -12,11 +12,12 @@
 // 连续 DATA 在进程内无限堆积。
 inline constexpr std::size_t kDefaultOutboundQueueCapacity = 64U * 1024U;
 
-// 帧类型只影响发送优先级和溢出处理，不改变线上帧的字节内容。
+// 已编码帧在本地队列中的调度类别。
+// 该类别不写入线上数据，只决定可否丢弃和控制响应能否越过尚未发送的 DATA。
 enum class OutboundFrameKind
 {
-    Control, // ACK、STATUS、ERROR 等需要优先响应的控制帧
-    Data     // 可在尚未开始发送时被控制帧越过或因背压而丢弃的数据帧
+    Control, // ACK、STATUS、ERROR：不可丢弃，并优先于尚未开始的 DATA
+    Data     // DATA：未开始发送时可被控制帧越过，也可因背压被丢弃
 };
 
 // 指向当前应发送帧中尚未发送的连续字节。
@@ -24,8 +25,8 @@ enum class OutboundFrameKind
 // OutboundChunk 不拥有内存，真正的字节仍由 OutboundQueue 内部 vector 持有。
 struct OutboundChunk
 {
-    const std::uint8_t* data{nullptr}; // 尚未发送部分的起始地址
-    std::size_t size{0};               // 从 data 开始可发送的剩余字节数
+    const std::uint8_t* data{nullptr}; // 借用的剩余区间起点，不转移字节所有权
+    std::size_t size{0};               // 从 data 开始到当前帧末尾的连续字节数
     OutboundFrameKind kind{OutboundFrameKind::Control}; // 当前帧的调度类别
 };
 
@@ -69,10 +70,16 @@ public:
     // 返回实际丢弃的编码字节数。
     std::size_t discard_unsent_data() noexcept;
 
-    // 以下查询均不改变队列；queued_bytes() 统计完整持有量而非待发送余量。
+    // 队列中是否没有任何控制帧或 DATA 帧。
     [[nodiscard]] bool empty() const noexcept;
+
+    // 返回仍由队列持有的完整 vector 字节总数；已发送前缀在整帧出队前仍计入。
     [[nodiscard]] std::size_t queued_bytes() const noexcept;
+
+    // 返回控制队列与 DATA 队列中的完整帧条目总数。
     [[nodiscard]] std::size_t queued_frames() const noexcept;
+
+    // 返回构造时确定的逻辑容量上限。
     [[nodiscard]] std::size_t capacity_bytes() const noexcept;
 
 private:
@@ -80,8 +87,8 @@ private:
     // 在整帧完成前 bytes 不缩容，从而保持 front() 返回区间连续。
     struct Entry
     {
-        std::vector<std::uint8_t> bytes;
-        std::size_t offset{0};
+        std::vector<std::uint8_t> bytes; // 一帧完整编码字节，在出队前保持存储稳定
+        std::size_t offset{0};           // 已被 send() 接受的前缀长度
     };
 
     // 使用“待加入字节数 <= 剩余容量”判断，避免加法形式发生 size_t 溢出。
@@ -94,10 +101,10 @@ private:
     [[nodiscard]] OutboundFrameKind current_kind() const noexcept;
     void pop_current();
 
-    std::size_t capacity_bytes_;            // 构造后固定的最大持有字节数
-    std::size_t queued_bytes_{0};           // 两类队列中完整 vector 的总字节数
-    std::deque<Entry> control_frames_;      // 控制帧内部保持 FIFO
-    std::deque<Entry> data_frames_;         // DATA 帧内部保持 FIFO
+    std::size_t capacity_bytes_;       // 构造后固定的最大持有字节数
+    std::size_t queued_bytes_{0};      // 两类队列中完整 vector 的总字节数
+    std::deque<Entry> control_frames_; // 控制帧内部保持 FIFO
+    std::deque<Entry> data_frames_;    // DATA 帧内部保持 FIFO
 };
 
 #endif // VIRTUALBENTH_OUTBOUND_QUEUE_H

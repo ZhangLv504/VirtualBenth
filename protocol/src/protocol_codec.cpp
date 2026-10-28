@@ -30,7 +30,9 @@ namespace
     }
 } // namespace
 
-// 编码固定布局：magic(2) + version(1) + command(1) + payload_len(2) + payload + CRC(2)。
+// 编码思路：先完成所有可能失败的通用校验，再一次性分配精确帧长，最后按线上
+// 固定布局写入 magic(2) + version(1) + command(1) + payload_len(2) + payload + CRC(2)。
+// 因为失败发生在结果字节生成前，调用方不会拿到可误发的部分帧。
 EncodeResult ProtocolCodec::encode(const Frame& frame)
 {
     EncodeResult result;
@@ -86,8 +88,9 @@ EncodeResult ProtocolCodec::encode(const Frame& frame)
 
     return result;
 }
-
-
+// 解码思路：逐步扩大“可以安全读取”的范围。先确认固定头和声明长度，再要求输入
+// 恰好是一帧，最后校验 CRC；只有全部通过才复制字段并发布 Frame。版本和命令的
+// 业务合法性故意留给上层，使其能够针对未知值返回明确的协议 ERROR。
 DecodeResult ProtocolCodec::decode(const std::vector<std::uint8_t>& bytes)
 {
     DecodeResult result;

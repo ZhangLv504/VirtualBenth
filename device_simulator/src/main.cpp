@@ -4,6 +4,8 @@
 #include <exception>
 #include <iostream>
 
+// 模拟器进程入口只负责建立生命周期顺序和统一异常边界；协议状态机、Socket
+// 事件循环及资源释放分别由 TcpServer、WinsockRuntime 和各自的 RAII 对象负责。
 int main()
 {
     // 所有初始化和服务端执行都放在同一个异常边界内：Winsock 初始化失败、

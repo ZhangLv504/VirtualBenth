@@ -15,6 +15,8 @@ namespace
 
 std::vector<Frame> StreamParser::feed(const std::vector<std::uint8_t>& chunk)
 {
+    // TCP 只提供有序字节流，不保留应用帧边界。先把新字节并入持久缓存，再循环
+    // 完成“定位 magic -> 等待完整头/帧 -> 委托单帧解码 -> 精确消费”的过程。
     buffer_.insert(buffer_.end(), chunk.begin(), chunk.end());
     std::vector<Frame> frames;
 
@@ -82,10 +84,12 @@ std::vector<Frame> StreamParser::feed(const std::vector<std::uint8_t>& chunk)
 
 void StreamParser::reset() noexcept
 {
+    // reset() 明确放弃当前连接尚未完成的候选帧；vector 容量可保留以便后续复用。
     buffer_.clear();
 }
 
 std::size_t StreamParser::buffered_size() const noexcept
 {
+    // 只报告逻辑字节数，不暴露内部存储，避免连接层破坏解析不变量。
     return buffer_.size();
 }

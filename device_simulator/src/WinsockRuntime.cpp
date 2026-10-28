@@ -25,24 +25,29 @@
 
 namespace
 {
-    // 这是当前 TCP 连接的内部业务状态，不是 STATUS 帧的线上状态码。
-    // AwaitHello 在线上没有对应值，因此禁止直接 static_cast 后发送。
+    // 当前 TCP 连接的内部控制状态。
+    //
+    // 它描述“下一条控制命令是否可执行”，不是 STATUS 帧的线上状态码；尤其
+    // AwaitHello 在线上没有对应值，禁止把枚举值直接 static_cast 后发送。
     enum class SessionState
     {
-        AwaitHello,     // 等待Hello
-        Ready,          // HELLO 成功，待命
-        Running,        // 采集中，持续推送 DATA
-        Idle,           // 空闲，未采样
+        AwaitHello, // TCP 已连接但尚未完成 HELLO，只接受 HELLO
+        Ready,      // HELLO 响应已发完，可以接受第一次 START
+        Running,    // START 响应已发完，采集配置有效，可以接受 STOP
+        Idle,       // STOP 响应已发完，采集已停止，可以再次 START
     };
 
-    // 当前 TCP 连接中一次采集会话的配置与逐通道序号。
-    // START 成功后整体提交；STOP 成功时清空；连接结束时随 run() 的局部作用域销毁。
+    // 当前 TCP 连接内一次采集会话的可变上下文。
+    //
+    // START 的 ACK+STATUS 全部发送后整体初始化，STOP 的响应全部发送后清空；
+    // 连接结束时随 TcpServer::run() 的局部作用域销毁，不会泄漏到下一条连接。
     struct SamplingContext
     {
-        std::uint32_t sample_rate{0};
-        std::uint8_t channel_mask{0};
-        std::array<std::uint32_t, 8> sequence_by_channel{};
+        std::uint32_t sample_rate{0}; // START 指定的每通道每秒样本数；0 表示未配置
+        std::uint8_t channel_mask{0}; // bit0～bit7 分别表示通道 0～7 是否启用
+        std::array<std::uint32_t, 8> sequence_by_channel{}; // 各通道下一 DATA 序号
 
+        // 原子地应用新 START 配置，并把所有通道序号恢复到新会话起点 0。
         void start(std::uint32_t new_sample_rate, std::uint8_t new_channel_mask) noexcept
         {
             sample_rate = new_sample_rate;
@@ -50,6 +55,7 @@ namespace
             sequence_by_channel.fill(0);
         }
 
+        // 清除停止会话后的全部配置和序号，使旧采集数据不能污染下次 START。
         void reset() noexcept
         {
             sample_rate = 0;
@@ -128,42 +134,50 @@ namespace
         SOCKET socket_;
     };
 
+    // process_frame() 交给连接事件循环执行的生命周期决策。
+    // 业务函数只负责校验和入队，不直接关闭 Socket，因而可以先排空错误响应。
     enum class FrameAction
     {
         KeepConnection, // 当前帧响应已入队，可继续当前连接
         CloseAfterFlush, // 响应全部发送后关闭当前连接
-        FatalError,     // 编码或响应入队失败，无法可靠继续会话
+        FatalError,      // 编码或响应入队失败，无法可靠继续会话
     };
 
+    // PendingTransition 对采样上下文的延迟操作。
+    // 它与目标会话状态分开表示，因为 HELLO 只改状态，START/STOP 还要改上下文。
     enum class SamplingUpdate
     {
-        None,
-        Start,
-        Reset,
+        None,  // 不改变 SamplingContext，例如 HELLO 成功
+        Start, // 用 PendingTransition 中的参数开始新采集会话
+        Reset, // 清空已经停止的采集会话
     };
 
     // 成功控制命令的状态变更不能在响应刚入队时提交。只有 ACK 与 STATUS 的
     // 全部字节都被 send() 接受后，事件循环才应用这里保存的待提交变更。
     struct PendingTransition
     {
-        SessionState target_state{SessionState::AwaitHello};
-        SamplingUpdate sampling_update{SamplingUpdate::None};
-        std::uint32_t sample_rate{0};
-        std::uint8_t channel_mask{0};
+        SessionState target_state{SessionState::AwaitHello}; // 响应排空后提交的状态
+        SamplingUpdate sampling_update{SamplingUpdate::None}; // 同时执行的上下文操作
+        std::uint32_t sample_rate{0}; // SamplingUpdate::Start 使用的采样率
+        std::uint8_t channel_mask{0}; // SamplingUpdate::Start 使用的通道掩码
     };
 
     // 除 WSAStartup() 外，多数 Winsock API 用特殊返回值报告失败，再通过
     // WSAGetLastError() 获取线程最近一次 Winsock 错误码。
+    // 此重载必须紧跟失败 API 调用，避免后续 Winsock 调用覆盖线程错误码。
     void report_winsock_error(const char* operation)
     {
         std::cerr << operation << " failed, WSA error=" << WSAGetLastError() << '\n';
     }
 
+    // 已经提前保存错误码时使用本重载，避免日志阶段再次读取被覆盖的 last error。
     void report_winsock_error(const char* operation, int error_code)
     {
         std::cerr << operation << " failed, WSA error=" << error_code << '\n';
     }
 
+    // 把业务层 Frame 编成完整线上字节，并把所有失败统一记录为日志 + false。
+    // 先编码到局部结果，成功后再移动给 bytes，保证失败时调用方不会得到半帧。
     [[nodiscard]] bool encode_frame(
         const Frame& frame,
         std::vector<std::uint8_t>& bytes)
@@ -194,6 +208,7 @@ namespace
         return error_frame;
     }
 
+    // 构造控制命令成功确认。payload[0] 回显原命令，payload[1] 固定为 OK。
     [[nodiscard]] Frame make_ack_frame(Command command)
     {
         Frame ack_frame;
@@ -202,6 +217,7 @@ namespace
         return ack_frame;
     }
 
+    // 构造单字节 STATUS；参数必须来自协议定义的 IDLE/READY/RUNNING 状态码。
     [[nodiscard]] Frame make_status_frame(std::uint8_t status)
     {
         Frame status_frame;
@@ -210,6 +226,8 @@ namespace
         return status_frame;
     }
 
+    // 为一组控制响应预留总容量。若剩余空间不足，先丢弃所有尚未开始发送的
+    // DATA；已部分发送的 DATA 和既有控制帧不可撤回，清理后仍不足则返回 false。
     [[nodiscard]] bool ensure_control_capacity(
         OutboundQueue& outbound_queue,
         std::size_t required_bytes)
@@ -227,6 +245,8 @@ namespace
             outbound_queue.capacity_bytes() - outbound_queue.queued_bytes();
     }
 
+    // 编码单个控制帧并移动入队。返回 false 表示编码失败或硬容量仍不足；
+    // 实际 Socket 发送由事件循环统一完成。
     [[nodiscard]] bool enqueue_control_frame(
         OutboundQueue& outbound_queue,
         const Frame& frame)

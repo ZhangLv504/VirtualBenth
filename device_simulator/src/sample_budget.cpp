@@ -6,7 +6,8 @@
 
 namespace
 {
-    // 校验采样率：协议和业务逻辑均不允许采样率为 0
+    // 集中维护构造和 reset() 的共同前置条件。先校验、后修改对象，确保 reset(0)
+    // 抛出异常时旧采样率和旧积分仍保持原样。
     void validate_sample_rate(std::uint32_t sample_rate)
     {
         if (sample_rate == 0)
@@ -19,6 +20,7 @@ namespace
 SampleBudget::SampleBudget(std::uint32_t sample_rate)
     : sample_rate_(sample_rate)
 {
+    // 成员先按参数初始化，再验证协议前置条件；构造失败时对象不会对外可见。
     validate_sample_rate(sample_rate_);
 }
 
@@ -36,8 +38,8 @@ TickSampleBudget SampleBudget::next_tick()
     TickSampleBudget result;
     result.total_samples = static_cast<std::uint32_t>(total);
 
-    // 预计算需要拆分的帧数，向上取整 (total / 1020)，预留 vector 容量避免多次扩容。
-    // 注：修正了代码中的减号 (total + max - 1) / max 才是正确的向上取整写法。
+    // 预计算 ceil(total / 1020) 并预留容量；total 为 0 时结果自然为 0，后续循环
+    // 不生成空 DATA 分段。
     const std::uint64_t segment_count =
         (total + kMaxSamplesPerDataFrame - 1) / kMaxSamplesPerDataFrame;
     result.segments.reserve(static_cast<std::size_t>(segment_count));

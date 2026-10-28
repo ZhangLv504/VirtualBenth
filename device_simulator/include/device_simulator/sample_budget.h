@@ -4,39 +4,50 @@
 #include <cstdint>
 #include <vector>
 
-// 每秒逻辑 tick 数量（固定 20ms 一次 tick，即 1000/20 = 50）
+// 每秒逻辑 tick 数量：当前调度周期固定为 20ms，因此每秒推进 50 次预算。
 inline constexpr std::uint32_t kDataTicksPerSecond = 50;
-// 协议规定单帧最大承载的样本数（受限于 4096B payload 最大长度与 15B 头部开销）[cite: 1]
+// DATA 固定字段占 15B、每个 int32 样本占 4B；在 4096B payload 上限内最多 1020 个。
 inline constexpr std::uint16_t kMaxSamplesPerDataFrame = 1020;
 
-// 单次 tick 的样本分配结果
+// 一个逻辑 tick 的样本发送预算。
+//
+// total_samples 表示该 tick 应产生的总样本数；segments 按协议单帧上限把总数拆成
+// 多段，每个元素可直接写入一个 DATA 帧的 cnt。total_samples 为 0 时 segments 为空。
 struct TickSampleBudget
 {
-    std::uint32_t total_samples{0};       // 当前 tick 需要发送的样本总数
-    std::vector<std::uint16_t> segments;  // 超出 1020 上限时，拆分后的各帧样本数切片集合
+    std::uint32_t total_samples{0};      // 本 tick 应生成的样本总数
+    std::vector<std::uint16_t> segments; // 各 DATA 帧样本数，顺序之和等于 total_samples
 };
 
-// 样本预算分配器（整数累加算法）
-// 把每秒 sample_rate 个样本无浮点地分配到 50 个 20ms 逻辑 tick。
-// credit 跨 tick 保存不足一个样本的余数；每个分段都可直接放入 DATA.cnt。
+// 使用整数积分法把每秒 sample_rate 个样本分配到 50 个逻辑 tick。
+//
+// 每次 next_tick() 把 sample_rate 加入 credit_，再用除法兑换本 tick 的完整样本，
+// 余数继续跨 tick 保存。这样既能表达低于 50Hz 的采样率，也不会产生浮点累计误差。
+// 类实例属于一次采集会话；新 START 应调用 reset()，不能沿用上一会话的余数。
 class SampleBudget final
 {
 public:
-    // 构造函数，初始化并校验采样率
+    // 创建初始预算器。sample_rate 是每通道每秒样本数，必须大于 0；否则抛出
+    // std::invalid_argument。构造后第一 tick 从零 credit 开始。
     explicit SampleBudget(std::uint32_t sample_rate);
 
-    // 推进到下一个 tick，计算并返回本次 tick 应发的样本总数和拆帧切片
+    // 推进恰好一个逻辑 tick。先累计积分、兑换完整样本，再按每帧 1020 个上限
+    // 拆分 segments；返回后 credit_ 只保留不足一个样本的积分余数。
     [[nodiscard]] TickSampleBudget next_tick();
 
-    // 新采集会话必须重置 credit，避免上一会话的分数预算泄漏进来。
+    // 开始新的采集会话：校验并替换采样率，同时清零积分余数。
+    // sample_rate 为 0 时抛出 std::invalid_argument，且对象原状态保持不变。
     void reset(std::uint32_t sample_rate);
 
+    // 返回当前配置的每秒样本数，不推进预算。
     [[nodiscard]] std::uint32_t sample_rate() const noexcept;
+
+    // 返回尚未兑换成完整样本的积分；正常状态下恒小于 kDataTicksPerSecond。
     [[nodiscard]] std::uint64_t credit() const noexcept;
 
 private:
-    std::uint32_t sample_rate_; // 目标采样率（每秒样本数）
-    std::uint64_t credit_{0};   // 样本积分池（不足一个完整样本的碎片累加器）
+    std::uint32_t sample_rate_; // 当前会话每通道每秒样本数，始终大于 0
+    std::uint64_t credit_{0};   // 跨 tick 积分余数，单位为“1/50 个样本”
 };
 
 #endif // VIRTUALBENTH_SAMPLE_BUDGET_H

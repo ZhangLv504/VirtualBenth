@@ -7,19 +7,27 @@
 
 #include "frame.h"
 
+// 把任意分块到达的 TCP 字节流恢复成完整协议帧。
+//
+// 每个实例只能绑定一条有序字节流。buffer_ 跨 feed() 调用保存半个 magic、帧头或
+// payload；遇到噪声、超长头或 CRC 错误时按 1B 滑动重新寻找下一帧，不把业务层
+// 的未知版本/命令误判为同步错误。本类不负责超时，连接层决定何时 reset()。
 class StreamParser
 {
 public:
-    // 追加任意大小的数据块，并返回本次调用中解析出的 0～N 个完整帧。
+    // 把 chunk 追加到连接缓存，并尽可能解析出 0～N 个完整帧。
+    // 返回值只包含本次调用新完成的帧；未完成尾部继续留在 buffer_ 中。
     std::vector<Frame> feed(const std::vector<std::uint8_t>& chunk);
 
-    // 清空尚未组成完整帧的缓存；帧接收超时由连接层判定后调用本函数。
+    // 清空尚未组成完整帧的缓存。通常在连接关闭、协议接收超时或显式放弃当前
+    // 字节流时调用；已经由 feed() 返回的 Frame 不受影响。
     void reset() noexcept;
 
-    // 获取缓存大小
+    // 返回尚未消费的原始字节数，供诊断和连接层的缓存/超时策略使用。
     [[nodiscard]] std::size_t buffered_size() const noexcept;
 
 private:
+    // 尚未组成可信完整帧的连接局部字节；成功帧一经返回即从这里精确移除。
     std::vector<std::uint8_t> buffer_;
 };
 

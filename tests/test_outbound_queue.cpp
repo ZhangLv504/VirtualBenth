@@ -8,6 +8,8 @@
 
 namespace
 {
+    // 用可读的十六进制初始化列表构造最小测试帧，避免各用例重复声明临时 vector；
+    // 这些字节只用于验证队列顺序和容量，不要求本身是合法协议帧。
     std::vector<std::uint8_t> bytes(std::initializer_list<std::uint8_t> values)
     {
         return std::vector<std::uint8_t>(values);

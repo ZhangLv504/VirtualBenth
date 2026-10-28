@@ -8,6 +8,8 @@
 
 namespace
 {
+    // 测试修改版本、命令或 payload 后，按新内容重算帧尾 CRC。这样可以分别验证
+    // “CRC 正确但业务值未知”和“CRC 本身损坏”，不会把两个失败原因混在一起。
     void rewrite_frame_crc(std::vector<std::uint8_t>& bytes)
     {
         const std::uint16_t payload_len = static_cast<std::uint16_t>(bytes[4])
