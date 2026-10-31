@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue` 以及非阻塞控制响应路径已通过默认 VS2022 + `RelWithDebInfo` 构建、全部自动化回归和真实 TCP 字节联调。已验收的 `HEAD 8f40b27` 仍不生成 DATA。当前工作区在 `WinsockRuntime.cpp` 中提前接入了预算、时钟、组帧和网络队列，2026-11-01 静态审查发现线上字段与背压策略阻断项，尚未构建或测试，不能视为 DATA 已实现。
-- 当前唯一目标：把本轮功能改动收缩回“不依赖 Socket、tick、时钟、序号生命周期或队列”的纯 DATA 单帧组装组件，并先用协议第 9.4 节精确字节测试证明 `chan_id/seq/ts/cnt/samples`。该小步静态审查通过前不接入 `WinsockRuntime`。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue` 以及非阻塞控制响应路径已通过默认 VS2022 + `RelWithDebInfo` 构建、全部自动化回归和真实 TCP 字节联调。2026-11-01 工作区已撤回提前接入 `WinsockRuntime` 的 DATA 路径，并新增不依赖 Socket、tick、时钟或队列的纯 `data_frame_builder`；协议第 9.4 节精确向量及 1020/1021 样本边界测试已完成静态复审，但尚未构建或运行。运行时当前仍不生成 DATA。
+- 当前唯一目标：经用户许可后，在默认 VS2022 + `RelWithDebInfo` 环境构建 `device_simulator` 和全部四组测试，运行 CTest 及 `data_frame_builder_tests`，取得纯 DATA 单帧组装的实际编译与行为证据；通过前不接入运行时 DATA。
 
 ## 默认构建环境
 
@@ -93,6 +93,7 @@
 - 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建、协议回归和真实 TCP 控制路径联调；当前 tick 只推进截止时间，不生成或发送 DATA。
 - 连接局部 `SamplingContext` 已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。由于当前尚不发送 DATA，采样率值、通道掩码内容和序号清零仍没有线上可观察数据，后续 DATA 首帧测试需继续覆盖这些内部结果。
 - 接受后的客户端 Socket 已切换为非阻塞模式，只在 `OutboundQueue` 非空时监听 `writefds`；每次可写只调用一次 `send()`，用真实返回值推进部分发送偏移，并把 `WSAEWOULDBLOCK` 视为可重试状态。ACK+STATUS 全部排空后才提交会话状态和采样上下文；版本不匹配的 ERROR 排空后再关闭。该实现已通过静态复审、`git diff --check`、默认环境构建、全部自动化回归和完整真实 TCP 控制路径联调；部分发送与 `WSAEWOULDBLOCK` 分支仍只具备静态/纯队列证据，尚未被真实网络强制触发。
+- 纯 `data_frame_builder` 已在 `simulator_core` 中实现：显式输入 `chan_id/seq/ts/samples`，输出业务 `Frame`；整数和 float 位模式均显式按小端写入，不读取时钟、不修改序号、不操作队列。DATA 单帧上限已放入独立 `data_frame_limits.h`，组帧器不再依赖 tick 预算类型。协议第 9.4 节完整编码向量、1020 样本最大边界和 1021 样本拒绝测试已静态复审通过，但尚未构建或运行。
 
 ## 待处理/已知问题
 
@@ -102,12 +103,12 @@
 - 当前 20ms DATA tick 和 `SampleBudget` 只完成调度与样本数量计算，不代表已经实现协议 DATA；START 的采样率/通道掩码及独立序号状态已在工作区保存，但尚未生成 `chanId/seq/ts/cnt/samples`、UTC 时间戳或波形数据。
 - 64KiB `OutboundQueue` 纯核心及网络控制路径已完成构建、自动化回归和真实 TCP 联调。空队列按实现不会加入 `writefds`；部分发送和 `WSAEWOULDBLOCK` 分支仍缺自动化故障注入证据，但不阻断先实现不依赖网络的 DATA 单帧组装核心。
 - `Doc/项目规划V3.1.md` 第 2.4 节仍把 DATA 的 `ts` 描述为“模拟器启动后的单调时间”，与权威 `Doc/协议文档.md` 的“UTC Unix Epoch 微秒”冲突。按仓库优先级，线上 DATA 必须使用 UTC Epoch；`steady_clock` 仅用于本机节拍和超时。
-- 2026-11-01 的工作区 DATA 尝试存在静态阻断项：`chanId` 写成整个通道掩码；`ts` 在右移前截断到 8 位且大位移存在未定义行为；float 字节直接复制主机内存；各分段重复使用当前系统时间而未按样本数推进；队列满时仅丢新帧而未按冻结策略清理、发送 INTERNAL 并关闭；已有 DATA 积压时 `pending_frames` 门控还会推迟 STOP 业务处理。当前审查不通过。
+- 2026-11-01 首版工作区 DATA 网络集成曾存在 `chanId`、`ts`、float 字节序、分段时间线、队列溢出和 STOP 优先级阻断项；当前工作区已整体撤回该运行时路径，改为纯组帧组件。上述网络集成问题保留为后续接入时的验收清单，不再阻断纯组件构建测试。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-11-01 核对时本地 `main`、`origin/main` 与 `HEAD 8f40b27` 一致；该提交包含注释、进度文档及已验收的非阻塞控制路径，仍不生成 DATA。当前仅 `device_simulator/src/WinsockRuntime.cpp` 有未提交功能修改，共新增 85 行、删除 2 行；未暂存、未提交、未推送。
+- 2026-11-01 核对时本地 `main`、`origin/main` 与 `HEAD a8128b9` 一致；用户提交仍把 DATA 提前接入 `WinsockRuntime`。当前工作区按授权撤回该功能路径，新增 `data_frame_builder.h/.cpp`、`data_frame_limits.h`、独立测试及 CMake 登记；这些修正未暂存、未提交、未推送。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -171,12 +172,13 @@
 48. 2026-10-28 审查用户提供的连续 NetAssist 日志：HELLO、START、STOP 的六个响应帧逐字节符合协议；空 payload DATA、STATUS、ACK 均为结构和 CRC 正确的完整帧，并各自得到精确 BAD_STATE。日志尚未给出错误后的再次 START→STOP，因此本轮记为真实 TCP 部分通过，不提前宣告整个门槛完成。
 49. 2026-10-28 用户继续使用原连接，未重新 HELLO 即成功完成 START→RUNNING、约 20 秒后 STOP→IDLE；四个响应帧逐字节符合协议。若连接曾重建，AwaitHello 状态会拒绝 START，因此这组证据完成了错误后连接保持、Idle 状态保持、解析同步和非阻塞成功响应的联合验收。当前 TCP 门槛通过，下一小步转入纯 DATA 单帧组装，不直接接入网络。
 50. 2026-11-01 静态审查工作区 DATA 实现：改动没有建立纯组帧组件或权威示例测试，而是直接在 `WinsockRuntime.cpp` 接入 `SampleBudget`、系统时钟、序号、组帧和发送队列。发现 `chanId`/`ts` 线上字节错误、float 主机字节序依赖、分段时间线未推进、队列溢出策略冲突以及 DATA 积压可能延迟 STOP 等阻断项；审查不通过，本轮未运行构建或测试，也未修改用户核心实现。
+51. 2026-11-01 用户提交后仍未建立纯组件，按其“还有问题直接修改”的授权收缩范围：撤回 `WinsockRuntime` 中全部 DATA 预算/组帧/入队逻辑，恢复已验收的控制基线；新增纯 `data_frame_builder`，通过 32/64 位整数逐字节小端写入和 `memcpy` 取得 float32 位模式后再小端写入；单帧上限抽到独立 `data_frame_limits.h`，避免组帧与 tick 预算互相依赖。新增协议第 9.4 节精确向量及 1020/1021 边界测试，并登记到 `simulator_core` 和 CTest。静态复核与独立 CRC 重算一致，本轮未运行构建或测试。
 
 ## 下一步流程
 
-1. 从 `WinsockRuntime.cpp` 移除本轮提前接入的 DATA 功能路径，保留已经验收的控制路径和有价值的注释，不改动无关代码。
-2. 在 `simulator_core` 中建立纯 DATA 单帧组装接口与协议第 9.4 节精确字节测试；输入显式字段和样本，函数内部不读取时钟、不改序号、不操作队列。
-3. 用户提交后先做静态复审；通过后再征得许可，在默认 VS2022 + `RelWithDebInfo` 环境构建和运行新增测试。
+1. 获得用户构建/测试许可后，先核对 `build/CMakeCache.txt` 的 VS2022、x64、多配置和 MSVC 19.38。
+2. 使用 `RelWithDebInfo` 构建 `device_simulator`、`protocol_tests`、`sample_budget_tests`、`outbound_queue_tests`、`data_frame_builder_tests`。
+3. 运行 CTest 和新增测试程序；全部通过后再设计 DATA 时间线与序号生命周期，不直接接入完整网络推流。
 
 ## 暂不开始
 

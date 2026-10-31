@@ -42,3 +42,14 @@ target_link_libraries(outbound_queue_tests PRIVATE
 )
 
 add_test(NAME outbound_queue_tests COMMAND outbound_queue_tests)
+
+add_executable(data_frame_builder_tests
+    test_data_frame_builder.cpp
+)
+
+target_link_libraries(data_frame_builder_tests PRIVATE
+    simulator_core
+    catch2_amalgamated
+)
+
+add_test(NAME data_frame_builder_tests COMMAND data_frame_builder_tests)

@@ -1,13 +1,13 @@
 #ifndef VIRTUALBENTH_SAMPLE_BUDGET_H
 #define VIRTUALBENTH_SAMPLE_BUDGET_H
 
+#include "device_simulator/data_frame_limits.h"
+
 #include <cstdint>
 #include <vector>
 
 // 每秒逻辑 tick 数量：当前调度周期固定为 20ms，因此每秒推进 50 次预算。
 inline constexpr std::uint32_t kDataTicksPerSecond = 50;
-// DATA 固定字段占 15B、每个 int32 样本占 4B；在 4096B payload 上限内最多 1020 个。
-inline constexpr std::uint16_t kMaxSamplesPerDataFrame = 1020;
 
 // 一个逻辑 tick 的样本发送预算。
 //
