@@ -83,6 +83,8 @@ namespace
     constexpr std::uint16_t kErrorBadParameter = 0x0003;
     // 0x0004 对应 BAD_STATE 错误码，表示状态非法（如未启动就 STOP）
     constexpr std::uint16_t kErrorBadState = 0x0004;
+    // 0x0005 对应 INTERNAL 错误码，表示设备内部错误（如发送队列满载溢出等无法恢复的异常）
+    constexpr std::uint16_t kErrorInternal = 0x0005;
 
     // 4096 对应协议规定的 payload 的最大合法字节数
     constexpr std::size_t kReceiveBufferSize = 4096;
@@ -752,6 +754,10 @@ bool TcpServer::run()
                             {
                                 // 容量不足，直接丢弃新帧（模拟背压丢包），不影响连接状态
                                 std::cout << "Outbound queue full, dropping DATA frame\n";
+                                outbound_queue.discard_unsent_data();
+                                enqueue_error(outbound_queue, kErrorInternal);
+                                close_after_flush = true;
+                                break;
                             }
                             else
                             {
