@@ -8,6 +8,7 @@
 #include "protocol/protocol_codec.h"
 #include "protocol/stream_parser.h"
 #include "device_simulator/outbound_queue.h"
+#include "device_simulator/sample_budget.h"
 
 #include <algorithm>
 #include <array>
@@ -407,6 +408,9 @@ namespace
         }
 
         case Command::Data:
+        {
+
+        }
         case Command::Status:
         case Command::Ack:
         case Command::Error:
@@ -546,11 +550,20 @@ bool TcpServer::run()
     // 解析器内部可能保存半个 magic、帧头或 payload，缓存只能属于这一条 TCP 流；
     // 连接结束时销毁解析器，避免残留字节污染未来连接。
     StreamParser parser;
+    // [底层网络接收缓冲区] 每次调用非阻塞 recv() 时临时存放原始字节流，容量对应协议规定的 payload 最大合法大小
     std::array<char, kReceiveBufferSize> receive_buffer{};
+    // [应用层发送队列] 保存已编码等待发往网络的协议帧，负责管理容量上限、发送优先级以及部分发送进度的断点续传
     OutboundQueue outbound_queue;
+    // [待处理的合法协议帧队列] 存放 parser 解析且 CRC 校验通过的帧，将网络层的“字节解析”与业务层的“命令处理”解耦
     std::deque<Frame> pending_frames;
+    // [暂存的业务状态变更指令] 保证响应与状态同步：START/STOP 等引发的状态变更不会立刻生效，
+    // 而是暂存此处，直到对应的 ACK/STATUS 响应全部发送完毕（发送队列为空）后才真正应用
     std::optional<PendingTransition> pending_transition;
+    // [优雅关闭] 为 true 时，停止把该 Socket 加入读监听（不接新命令）
+    // 仅监听写事件以排空 outbound_queue 中的错误响应，全部发完后再主动断开连接
     bool close_after_flush = false;
+    // [数据生成积分器] 将指定的每秒样本数无浮点误差地平摊到 20ms 的网络发送节拍中。
+    SampleBudget sample_budget(1);
 
     // 当前小步只搭建 DATA 节拍唤醒骨架，不生成真实 DATA。20ms 是临时周期；
     // 后续会根据 START.sample_rate 与每帧 cnt 计算真实截止时间。
@@ -568,8 +581,9 @@ bool TcpServer::run()
                 const PendingTransition transition = *pending_transition;
                 if (transition.sampling_update == SamplingUpdate::Start)
                 {
-                    sampling_context.start(
-                        transition.sample_rate, transition.channel_mask);
+                    sampling_context.start(transition.sample_rate, transition.channel_mask);
+                    // 重置积分器
+                    sample_budget.reset(transition.sample_rate);
                 }
                 else if (transition.sampling_update == SamplingUpdate::Reset)
                 {
@@ -647,6 +661,7 @@ bool TcpServer::run()
                 // 避免事件循环为了追赶历史截止点而高速空转。
                 do
                 {
+
                     next_data_deadline += kDataTickInterval;
                 }
                 while (next_data_deadline <= now);
@@ -672,6 +687,9 @@ bool TcpServer::run()
         // select 等待超时，没有 Socket 就绪
         if (ready == 0)
         {
+            // 调用 SampleBudget 获取当前 20ms tick 需要发送的样本数和分段策略
+            TickSampleBudget budget = sample_budget.next_tick();
+
             // Running 的 DATA 截止时间到达。当前骨架不发送帧，只推进到下一个未来截止点；
             // 正式 DATA 实现不得在 ACK(START)+RUNNING 之前进入这里。
             const auto now = std::chrono::steady_clock::now();
@@ -680,6 +698,71 @@ bool TcpServer::run()
                 next_data_deadline += kDataTickInterval;
             }
             while (next_data_deadline <= now);
+
+            // 根据预算生成 DATA 帧
+            if (budget.total_samples > 0)
+            {
+                // 协议要求 ts 是 UTC 微秒绝对时间
+                const auto utc_now = std::chrono::system_clock::now();
+                std::uint64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(
+                    utc_now.time_since_epoch()).count();
+
+                // 根据预算生成 DATA 帧
+                for (auto segment_samples : budget.segments)
+                {
+                    for (int ch = 0; ch < 8; ch++)
+                    {
+                        if ((sampling_context.channel_mask & (1 << ch)) == 0)
+                        {
+                            continue;
+                        }
+
+                        Frame frame{};
+                        frame.command = Command::Data;
+                        // chanId
+                        frame.payload.push_back(static_cast<std::uint8_t>(ch));
+                        // seq
+                        std::uint32_t current_seq = sampling_context.sequence_by_channel[ch];
+                        frame.payload.push_back(static_cast<std::uint8_t>(current_seq));
+                        frame.payload.push_back(static_cast<std::uint8_t>(current_seq >> 8));
+                        frame.payload.push_back(static_cast<std::uint8_t>(current_seq >> 16));
+                        frame.payload.push_back(static_cast<std::uint8_t>(current_seq >> 24));
+                        // ts
+                        for (int t = 0; t < 8; t++)
+                        {
+                            frame.payload.push_back(static_cast<std::uint8_t>(ts >> (8 * t)));
+                        }
+                        // cnt
+                        frame.payload.push_back(static_cast<std::uint8_t>(segment_samples));
+                        frame.payload.push_back(static_cast<std::uint8_t>(segment_samples >> 8));
+                        // samples
+                        float fake_sample = 1.0f;
+                        std::uint8_t sample_bytes[4];
+                        std::memcpy(sample_bytes, &fake_sample, sizeof(fake_sample));
+                        for (int s = 0; s < segment_samples; s++)
+                        {
+                            frame.payload.insert(frame.payload.end(), sample_bytes, sample_bytes + 4);
+                        }
+
+                        // 编码并排入发送队列
+                        std::vector<std::uint8_t> encoded_bytes;
+                        if (encode_frame(frame, encoded_bytes))
+                        {
+                            if (!outbound_queue.enqueue_data(std::move(encoded_bytes)))
+                            {
+                                // 容量不足，直接丢弃新帧（模拟背压丢包），不影响连接状态
+                                std::cout << "Outbound queue full, dropping DATA frame\n";
+                            }
+                            else
+                            {
+                                // 入队成功后，按协议要求该通道的 seq 加 1
+                                sampling_context.sequence_by_channel[ch] ++;
+                            }
+                        }
+                    }
+                }
+            }
+
             continue;
         }
         // 读事件优先处理，使 STOP 等控制输入不会被持续可写事件推迟。
