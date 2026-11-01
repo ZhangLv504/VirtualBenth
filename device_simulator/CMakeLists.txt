@@ -4,6 +4,8 @@ add_library(simulator_core STATIC
     include/device_simulator/data_frame_limits.h
     include/device_simulator/outbound_queue.h
     include/device_simulator/sample_budget.h
+    include/device_simulator/utc_sample_timeline.h
+    src/utc_sample_timeline.cpp
     src/data_frame_builder.cpp
     src/outbound_queue.cpp
     src/sample_budget.cpp
