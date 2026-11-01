@@ -51,10 +51,10 @@
 // 前置条件：sampling_context.sample_rate 必须等于 timeline.sample_rate()。
 // 两者分别由 START 写入，不一致时帧内 cnt 与时间线推进速率会互相矛盾。
 //
-// channel_mask 为 0 时循环体不执行，时间线按 0 个样本推进（起点和余数均不变）
-// 并返回 true（空真）；START 已拒绝掩码 0，因此运行时不会走到，测试须单独覆盖。
-// samples.size() 超过 1020 时在任何副作用发生前抛 std::invalid_argument：
-// 无帧入队、无序号提交、时间线不变。
+// channel_mask 为 0 时不入队、不推进时间线并返回 false；返回值无法与
+// 队列容量失败区分，调用方按同一失败语义处理（清未开始 DATA、尽力排
+// ERROR(INTERNAL)、关闭连接）。START 按协议 5.2 已拒绝掩码 0，STOP 后
+// 上下文 reset 为 0 且运行时不再生成 DATA，因此该分支运行时不可达。
 [[nodiscard]] bool enqueue_segment_channels(
     SamplingContext& sampling_context,
     OutboundQueue& outbound_queue,

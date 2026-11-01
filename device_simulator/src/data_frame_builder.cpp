@@ -104,21 +104,25 @@ bool enqueue_segment_channels(SamplingContext& sampling_context, OutboundQueue& 
 
     const std::uint64_t timestamp_us = timeline.current_ts_us();
 
-    for (std::uint32_t channel_id = 0; channel_id < 8; ++channel_id)
+    if (sampling_context.channel_mask != 0)
     {
-        const auto bit = static_cast<std::uint8_t>(1 << channel_id);
-        if ((sampling_context.channel_mask & bit) == 0)
+        for (std::uint32_t channel_id = 0; channel_id < 8; ++channel_id)
         {
-            continue;
+            const auto bit = static_cast<std::uint8_t>(1u << channel_id);
+            if ((sampling_context.channel_mask & bit) == 0)
+            {
+                continue;
+            }
+
+            if (!enqueue_channel_data(sampling_context, outbound_queue,
+                channel_id, timestamp_us, samples))
+            {
+                return false;
+            }
         }
 
-        if (!enqueue_channel_data(sampling_context, outbound_queue,
-            channel_id, timestamp_us, samples))
-        {
-            return false;
-        }
+        timeline.advance(static_cast<std::uint16_t>(samples.size()));
+        return true;
     }
-
-    timeline.advance(static_cast<std::uint16_t>(samples.size()));
-    return true;
+    return false;
 }
