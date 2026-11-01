@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder` 以及非阻塞控制响应路径均已通过各自既定验收。`UtcSampleTimeline` 的时间累加和重置校验阻断项已修正，独立测试及 CTest 目标已完成静态复审；尚未构建或运行，运行时仍不生成 DATA。
-- 当前唯一目标：经用户许可后，在默认 VS2022 + `RelWithDebInfo` 环境构建模拟器和全部五组测试，运行完整 CTest 及 `utc_sample_timeline_tests`，取得纯 UTC 时间线组件的实际编译与行为证据。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline` 以及非阻塞控制响应路径均已通过各自既定验收。运行时当前仍不生成 DATA。
+- 当前唯一目标：下一轮只冻结逐通道序号的读取、成功提交、失败不提交和新 START 清零契约，选择最小可测试边界；本小步不接入 `WinsockRuntime`，也不生成或发送 DATA。
 
 ## 默认构建环境
 
@@ -88,6 +88,7 @@
 - 2026-10-28 用户在上述连接中未重新 HELLO，直接再次发送合法 START，收到精确 ACK(START)+STATUS(RUNNING)；约 20 秒后发送 STOP，收到精确 ACK(STOP)+STATUS(IDLE)。新连接的 AwaitHello 状态不允许直接 START，因此该结果证明原 TCP 会话在三次 BAD_STATE 后仍保持 Idle，解析器与非阻塞发送队列均可继续完成成功响应。至此当前非阻塞控制响应路径的真实 TCP 验收完整通过。
 - 2026-11-01 核对默认 `build` 缓存和编译器识别文件：生成器为 Visual Studio 17 2022、x64、多配置，编译器为 MSVC 19.38.33145.0（工具集目录 14.38.33130）。使用 `RelWithDebInfo` 构建 `device_simulator`、`protocol_tests`、`sample_budget_tests`、`outbound_queue_tests`、`data_frame_builder_tests` 全部成功；日志确认 `data_frame_builder.cpp` 与新增测试实际参与编译。
 - 2026-11-01 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：4/4 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/data_frame_builder_tests.exe`：2 个测试用例、7 个断言全部通过。协议第 9.4 节精确字节、1020 样本最大合法 payload 和 1021 样本拒绝均取得自动化证据。
+- 2026-11-01 再次核对同一默认环境后，使用 `RelWithDebInfo` 成功构建 `device_simulator` 及全部五组测试；日志确认 `utc_sample_timeline.cpp` 与 `test_utc_sample_timeline.cpp` 实际参与编译。完整 CTest 5/5 通过、0 失败；直接运行 `utc_sample_timeline_tests.exe` 为 4 个用例、23 个断言全部通过，覆盖绝对起点、整除/零样本、非整除连续余数和重置异常安全。
 
 ## 已实现但未验证
 
@@ -95,7 +96,6 @@
 - 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建、协议回归和真实 TCP 控制路径联调；当前 tick 只推进截止时间，不生成或发送 DATA。
 - 连接局部 `SamplingContext` 已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。由于当前尚不发送 DATA，采样率值、通道掩码内容和序号清零仍没有线上可观察数据，后续 DATA 首帧测试需继续覆盖这些内部结果。
 - 接受后的客户端 Socket 已切换为非阻塞模式，只在 `OutboundQueue` 非空时监听 `writefds`；每次可写只调用一次 `send()`，用真实返回值推进部分发送偏移，并把 `WSAEWOULDBLOCK` 视为可重试状态。ACK+STATUS 全部排空后才提交会话状态和采样上下文；版本不匹配的 ERROR 排空后再关闭。该实现已通过静态复审、`git diff --check`、默认环境构建、全部自动化回归和完整真实 TCP 控制路径联调；部分发送与 `WSAEWOULDBLOCK` 分支仍只具备静态/纯队列证据，尚未被真实网络强制触发。
-- `UtcSampleTimeline` 已作为纯组件加入 `simulator_core`，没有读取系统时钟、Socket 或发送队列；时间戳使用整数商累加，余数跨分段保存，`reset()` 先校验新采样率再提交状态。独立测试已覆盖显式 UTC 起点、整除、零样本、不能整除的连续三段、零速率构造、失败重置保持旧状态及成功重置清零余数；当前仅通过静态复审，尚未构建或运行。
 
 ## 待处理/已知问题
 
@@ -106,12 +106,12 @@
 - 64KiB `OutboundQueue` 纯核心及网络控制路径已完成构建、自动化回归和真实 TCP 联调。空队列按实现不会加入 `writefds`；部分发送和 `WSAEWOULDBLOCK` 分支仍缺自动化故障注入证据，但不阻断先实现不依赖网络的 DATA 时间戳推进核心。
 - `Doc/项目规划V3.1.md` 第 2.4 节仍把 DATA 的 `ts` 描述为“模拟器启动后的单调时间”，与权威 `Doc/协议文档.md` 的“UTC Unix Epoch 微秒”冲突。按仓库优先级，线上 DATA 必须使用 UTC Epoch；`steady_clock` 仅用于本机节拍和超时。
 - 2026-11-01 首版工作区 DATA 网络集成曾存在 `chanId`、`ts`、float 字节序、分段时间线、队列溢出和 STOP 优先级阻断项；当前工作区已整体撤回该运行时路径，纯组帧组件已完成构建测试。上述网络集成问题保留为后续接入时的验收清单。
-- `UtcSampleTimeline::advance()` 覆盖绝对起点和 `reset()` 校验旧采样率的静态阻断项已在工作区修正；新增测试尚未取得编译及运行证据，当前不能宣称时间线组件已验收通过。
+- `UtcSampleTimeline::advance()` 覆盖绝对起点和 `reset()` 校验旧采样率的历史阻断项已修正，并已取得默认环境构建、CTest 和直接测试证据；时间线组件本身不再是待处理项。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-11-01 核对时本地 `main`、`origin/main` 与 `HEAD 07a9968` 一致。当前未提交修改包括用户对 `utc_sample_timeline.cpp` 的两个阻断项修正，以及助手新增的 `test_utc_sample_timeline.cpp`、CTest 登记、进度文档和本轮自测题；未接入 `WinsockRuntime`。
+- 2026-11-01 验收结束时本地 `main`、`origin/main` 与 `HEAD a62bd5d` 一致；该提交包含时间线阻断项修正、`test_utc_sample_timeline.cpp` 及 CTest 登记。当前仅进度文档与本轮自测题存在未提交更新，未接入 `WinsockRuntime`。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -179,12 +179,13 @@
 52. 2026-11-01 用户许可验收后，核对默认缓存为 VS2022、x64、多配置、MSVC 19.38/工具集 14.38；使用 `RelWithDebInfo` 成功构建模拟器与四组测试。CTest 4/4 通过，新增 DATA 组帧测试直接运行得到 2 个用例、7 个断言全部通过。纯 DATA 单帧组装小步完成，运行时仍不生成 DATA。
 53. 2026-11-01 静态审查提交 `07a9968`：组件边界保持纯净，但 `advance()` 用赋值覆盖绝对 UTC 起点，`reset()` 校验旧成员而不是新参数；同时没有 `test_utc_sample_timeline.cpp` 或 CTest 登记，未覆盖整除、不能整除、连续分段和无效重置。本轮审查不通过，未运行构建或测试，也未修改用户核心实现。
 54. 2026-11-01 复审用户修正：`advance()` 已改为在现有 UTC 起点上累加整数商，`reset()` 已改为先校验新参数。按用户授权新增独立 Catch2 测试和 CTest 目标，静态覆盖显式起点、整除/零样本、非整除连续余数、零速率构造以及重置异常安全；`git diff --check` 通过。本轮未运行构建或测试。
+55. 2026-11-01 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 成功构建模拟器和五组测试。CTest 5/5 通过，时间线测试直接运行得到 4 个用例、23 个断言全部通过。纯 UTC 时间线小步完成，运行时仍不生成 DATA。
 
 ## 下一步流程
 
-1. 获得用户许可后核对 `build/CMakeCache.txt` 的 VS2022、x64、多配置和 MSVC 19.38。
-2. 使用 `RelWithDebInfo` 构建 `device_simulator` 及 `protocol_tests`、`sample_budget_tests`、`outbound_queue_tests`、`data_frame_builder_tests`、`utc_sample_timeline_tests`。
-3. 运行完整 CTest 和新增测试程序；全部通过前不开始逐通道序号或网络接入。
+1. 先明确每个启用通道独立维护 `uint32_t` 序号，新 START 从 0 开始，读取当前值本身不修改状态。
+2. 冻结提交边界：只有对应完整 DATA 帧成功进入发送队列后才递增；组帧、编码或入队失败均保持原序号，回绕按无符号规则自然发生。
+3. 选择最小纯组件或可测试接口并由用户实现；静态复审通过前不接入 `WinsockRuntime`。
 
 ## 暂不开始
 
