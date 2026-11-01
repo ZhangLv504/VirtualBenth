@@ -95,12 +95,14 @@ bool enqueue_channel_data(
 }
 
 bool enqueue_segment_channels(SamplingContext& sampling_context, OutboundQueue& outbound_queue,
-    std::uint64_t timestamp_us, const std::vector<float>& samples)
+    UtcSampleTimeline& timeline, const std::vector<float>& samples)
 {
     if (samples.size() > kMaxSamplesPerDataFrame)
     {
         throw std::invalid_argument("DATA segment sample count exceeds 1020");
     }
+
+    const std::uint64_t timestamp_us = timeline.current_ts_us();
 
     for (std::uint32_t channel_id = 0; channel_id < 8; ++channel_id)
     {
@@ -117,5 +119,6 @@ bool enqueue_segment_channels(SamplingContext& sampling_context, OutboundQueue& 
         }
     }
 
+    timeline.advance(static_cast<std::uint16_t>(samples.size()));
     return true;
 }
