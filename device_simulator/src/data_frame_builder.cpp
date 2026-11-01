@@ -4,6 +4,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 #include "protocol/protocol_codec.h"
 
@@ -84,7 +85,7 @@ bool enqueue_channel_data(
     EncodeResult result = ProtocolCodec::encode(frame);
     if (result.ok())
     {
-        if (outbound_queue.enqueue_data(result.bytes))
+        if (outbound_queue.enqueue_data(std::move(result.bytes)))
         {
             sampling_context.commit_sequence(channel_id);
             return true;
