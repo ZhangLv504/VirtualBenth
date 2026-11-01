@@ -93,3 +93,29 @@ bool enqueue_channel_data(
     }
     return false;
 }
+
+bool enqueue_segment_channels(SamplingContext& sampling_context, OutboundQueue& outbound_queue,
+    std::uint64_t timestamp_us, const std::vector<float>& samples)
+{
+    if (samples.size() > kMaxSamplesPerDataFrame)
+    {
+        throw std::invalid_argument("DATA segment sample count exceeds 1020");
+    }
+
+    for (std::uint32_t channel_id = 0; channel_id < 8; ++channel_id)
+    {
+        const auto bit = static_cast<std::uint8_t>(1 << channel_id);
+        if ((sampling_context.channel_mask & bit) == 0)
+        {
+            continue;
+        }
+
+        if (!enqueue_channel_data(sampling_context, outbound_queue,
+            channel_id, timestamp_us, samples))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
