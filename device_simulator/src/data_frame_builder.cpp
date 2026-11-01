@@ -87,6 +87,8 @@ bool enqueue_channel_data(
         if (outbound_queue.enqueue_data(result.bytes))
         {
             sampling_context.commit_sequence(channel_id);
+            return true;
         }
     }
+    return false;
 }
