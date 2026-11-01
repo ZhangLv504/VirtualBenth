@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline` 以及非阻塞控制响应路径均已通过各自既定验收。`enqueue_channel_data()` 尚未接入 tick；三类事务测试和0～7通道前置条件已完成静态复审，但实现新增 `std::move` 后未直接包含 `<utility>`，尚未构建或运行。
-- 当前唯一目标：只在 `data_frame_builder.cpp` 直接包含 `<utility>`，消除 `std::move` 的传递包含依赖；复审通过后，再经用户许可构建模拟器和全部五组测试并运行 CTest。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务以及非阻塞控制响应路径均已通过各自既定验收。`enqueue_channel_data()` 尚未接入 tick，运行时仍不生成 DATA。
+- 当前唯一目标：先设计并冻结 tick 调用单通道 DATA 入队边界的最小职责、循环顺序和失败语义；暂不直接修改事件循环。
 
 ## 默认构建环境
 
@@ -90,13 +90,13 @@
 - 2026-11-01 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：4/4 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/data_frame_builder_tests.exe`：2 个测试用例、7 个断言全部通过。协议第 9.4 节精确字节、1020 样本最大合法 payload 和 1021 样本拒绝均取得自动化证据。
 - 2026-11-01 再次核对同一默认环境后，使用 `RelWithDebInfo` 成功构建 `device_simulator` 及全部五组测试；日志确认 `utc_sample_timeline.cpp` 与 `test_utc_sample_timeline.cpp` 实际参与编译。完整 CTest 5/5 通过、0 失败；直接运行 `utc_sample_timeline_tests.exe` 为 4 个用例、23 个断言全部通过，覆盖绝对起点、整除/零样本、非整除连续余数和重置异常安全。
 - 2026-11-01 序号接口封装完成后再次核对默认 VS2022、x64、MSVC 19.38环境，使用 `RelWithDebInfo` 成功构建模拟器与五组测试；日志确认 `WinsockRuntime.cpp` 实际重新编译。CTest 5/5 通过、0 失败，证明访问控制和接口声明可编译且既有回归未被破坏；由于新接口尚未调用，该结果不作为序号提交行为的动态证据。
+- 2026-11-01 单通道 DATA 入队事务收尾后重新核对默认缓存：Visual Studio 17 2022、x64、多配置、MSVC 19.38.33145.0（工具集 14.38.33130），并显式使用 `RelWithDebInfo`。构建模拟器及全部五组测试成功，日志确认 `data_frame_builder.cpp` 和最新 `test_data_frame_builder.cpp` 实际重新编译，相关目标 0 警告、0 错误；CTest 5/5 通过、0 失败，直接运行 `data_frame_builder_tests.exe` 为5个用例、25个断言全部通过。成功入队后序号只递增目标通道一次、容量拒绝和组帧异常时队列及序号不变均取得动态证据。
 
 ## 已实现但未验证
 
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
 - 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建、协议回归和真实 TCP 控制路径联调；当前 tick 只推进截止时间，不生成或发送 DATA。
 - 连接局部 `SamplingContext` 的既有 START/STOP 生命周期已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。工作区进一步将序号数组私有化，新增 `current_sequence()` 只读接口和 `commit_sequence()` 成功提交接口，并已通过默认环境构建与完整回归；接口尚未被运行时调用，成功递增和失败不递增仍需后续 DATA 路径测试观察。
-- `enqueue_channel_data()` 已在 `simulator_core` 中实现：显式接收上下文、队列、通道、时间戳和样本，依次读取序号、组帧、编码、移动字节进入 DATA 队列，并仅在入队成功后提交序号。该函数未接入事件循环；成功入队、容量拒绝和组帧异常测试及通道范围契约已完成静态复审，但尚未构建或运行，`std::move` 的直接标准头依赖仍需补充。
 - 接受后的客户端 Socket 已切换为非阻塞模式，只在 `OutboundQueue` 非空时监听 `writefds`；每次可写只调用一次 `send()`，用真实返回值推进部分发送偏移，并把 `WSAEWOULDBLOCK` 视为可重试状态。ACK+STATUS 全部排空后才提交会话状态和采样上下文；版本不匹配的 ERROR 排空后再关闭。该实现已通过静态复审、`git diff --check`、默认环境构建、全部自动化回归和完整真实 TCP 控制路径联调；部分发送与 `WSAEWOULDBLOCK` 分支仍只具备静态/纯队列证据，尚未被真实网络强制触发。
 
 ## 待处理/已知问题
@@ -109,12 +109,12 @@
 - `Doc/项目规划V3.1.md` 第 2.4 节仍把 DATA 的 `ts` 描述为“模拟器启动后的单调时间”，与权威 `Doc/协议文档.md` 的“UTC Unix Epoch 微秒”冲突。按仓库优先级，线上 DATA 必须使用 UTC Epoch；`steady_clock` 仅用于本机节拍和超时。
 - 2026-11-01 首版工作区 DATA 网络集成曾存在 `chanId`、`ts`、float 字节序、分段时间线、队列溢出和 STOP 优先级阻断项；当前工作区已整体撤回该运行时路径，纯组帧组件已完成构建测试。上述网络集成问题保留为后续接入时的验收清单。
 - `UtcSampleTimeline::advance()` 覆盖绝对起点和 `reset()` 校验旧采样率的历史阻断项已修正，并已取得默认环境构建、CTest 和直接测试证据；时间线组件本身不再是待处理项。
-- `test_data_frame_builder.cpp` 已直接包含 `data_frame_limits.h` 并补齐事务边界测试，`enqueue_channel_data()` 也已声明 `channel_id` 为0～7。实现现使用 `std::move(result.bytes)` 避免一次复制，但 `data_frame_builder.cpp` 没有直接包含 `<utility>`；必须消除这项传递包含依赖后再构建。
+- `enqueue_channel_data()` 的直接头依赖、0～7通道契约以及成功、容量拒绝、组帧异常三类事务测试均已通过默认环境构建和运行验收；它尚未被 tick 或事件循环调用，不能据此宣称运行时已经推送 DATA。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-11-01 静态审查开始时本地 `main`、`origin/main` 与 `HEAD 3c2788c` 一致；该提交包含 `SamplingContext` 头文件抽取和 `enqueue_channel_data()`，尚未接入 DATA 事件循环。当前未提交修改包括 DATA 测试的直接限制头、三类事务测试、进度文档和自测题。
+- 2026-11-01 运行验收时本地 `main`、`origin/main` 与 `HEAD cf2ca2e` 一致；该提交包含 `SamplingContext` 头文件抽取、`enqueue_channel_data()`、移动交付、直接头依赖、通道契约及三类事务测试，尚未接入 DATA 事件循环。当前 `AGENTS.md`、进度文档与自测题存在未提交更新。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -189,12 +189,14 @@
 59. 2026-11-01 静态审查提交 `f3aa324` / `3c2788c`：`enqueue_channel_data()` 的显式输入和成功后提交顺序符合冻结方向，且未接入事件循环；但 `data_frame_builder.h` 移除限制常量头后，现有测试仍使用 `kMaxSamplesPerDataFrame`，形成确定编译缺口。新函数也没有成功、容量失败或异常测试，审查不通过，本轮未运行构建或测试，也未修改用户核心实现。
 60. 2026-11-01 按用户此前“测试代码由助手添加”的授权，修复 `test_data_frame_builder.cpp` 的直接头文件依赖，并新增事务测试：成功入队检查完整编码帧及目标通道序号只递增一次；容量拒绝检查队列和序号不变；超长样本异常检查队列和序号不变。测试静态复审通过，但公开 `enqueue_channel_data()` 尚未直接声明0～7通道前置条件，本轮未构建或运行。
 61. 2026-11-01 复审用户收尾修改：公开接口已直接声明0～7通道前置条件，公共头包含路径也改为稳定的 `device_simulator/...` 形式；实现将编码结果移动交给队列，避免一次字节复制。但源文件使用 `std::move` 后未直接包含 `<utility>`，仍有传递包含依赖，未运行构建或测试。
+62. 2026-11-01 用户补充 `<utility>` 后完成最终静态复审：单通道 DATA 入队边界的公开契约、直接头依赖、成功后序号提交、容量拒绝和组帧异常测试均未发现剩余阻断项，`git diff --check` 通过。本轮未运行构建或测试。
+63. 2026-11-01 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 构建模拟器及五组测试成功；`data_frame_builder.cpp` 和最新事务测试实际重新编译，相关目标 0 警告、0 错误。CTest 5/5 通过，直接运行 DATA 测试为5个用例、25个断言全部通过。单通道 DATA 入队事务完成运行验收，运行时仍未接入 tick。
 
 ## 下一步流程
 
-1. 在 `data_frame_builder.cpp` 直接包含 `<utility>`，不依赖其他标准头偶然暴露 `std::move`。
-2. 用户修改后复审最终 diff；通过后征得许可，在默认 `RelWithDebInfo` 环境构建模拟器及五组测试。
-3. 运行完整 CTest 和 `data_frame_builder_tests`；通过前不把事务边界接入事件循环。
+1. 对照协议第 5.1.1 节，冻结一次到期 tick 内的分段、通道升序、共享时间戳及序号提交顺序。
+2. 明确任一 DATA 入队失败时由纯调用边界返回什么，以及上层如何执行清理未开始 DATA、排队 `ERROR(INTERNAL)` 和关闭连接；本轮只做设计，不改事件循环。
+3. 设计审查通过后，再让用户实现最小调用边界并补充纯自动化测试；通过前不接入 Winsock 事件循环。
 
 ## 暂不开始
 
