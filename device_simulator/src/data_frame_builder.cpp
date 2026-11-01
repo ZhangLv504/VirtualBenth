@@ -1,8 +1,11 @@
 #include "device_simulator/data_frame_builder.h"
+#include "device_simulator/data_frame_limits.h"
 
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+
+#include "protocol/protocol_codec.h"
 
 namespace
 {
@@ -67,4 +70,23 @@ Frame make_data_frame(
     }
 
     return frame;
+}
+
+
+bool enqueue_channel_data(
+    SamplingContext& sampling_context, OutboundQueue& outbound_queue, std::uint8_t channel_id,
+    std::uint64_t timestamp_us, const std::vector<float>& samples)
+{
+    Frame frame = make_data_frame(
+        channel_id, sampling_context.current_sequence(channel_id), timestamp_us, samples
+        );
+
+    EncodeResult result = ProtocolCodec::encode(frame);
+    if (result.ok())
+    {
+        if (outbound_queue.enqueue_data(result.bytes))
+        {
+            sampling_context.commit_sequence(channel_id);
+        }
+    }
 }

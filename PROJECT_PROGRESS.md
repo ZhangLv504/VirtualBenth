@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline` 以及非阻塞控制响应路径均已通过各自既定验收。运行时当前仍不生成 DATA。
-- 当前唯一目标：下一轮只冻结逐通道序号的读取、成功提交、失败不提交和新 START 清零契约，选择最小可测试边界；本小步不接入 `WinsockRuntime`，也不生成或发送 DATA。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline` 以及非阻塞控制响应路径均已通过各自既定验收。工作区的序号数组私有化及只读/成功提交接口已通过静态复审、默认环境构建和完整回归；新接口尚未被调用，运行时仍不生成 DATA。
+- 当前唯一目标：下一轮只建立一个尚不接入 tick 的“单通道 DATA 编码并尝试入队”最小边界：显式接收通道、时间戳和样本，复用现有序号、组帧器与发送队列，并保证只有入队成功才提交序号。
 
 ## 默认构建环境
 
@@ -89,12 +89,13 @@
 - 2026-11-01 核对默认 `build` 缓存和编译器识别文件：生成器为 Visual Studio 17 2022、x64、多配置，编译器为 MSVC 19.38.33145.0（工具集目录 14.38.33130）。使用 `RelWithDebInfo` 构建 `device_simulator`、`protocol_tests`、`sample_budget_tests`、`outbound_queue_tests`、`data_frame_builder_tests` 全部成功；日志确认 `data_frame_builder.cpp` 与新增测试实际参与编译。
 - 2026-11-01 执行 `ctest --test-dir build -C RelWithDebInfo --output-on-failure`：4/4 通过，0 失败；直接运行 `build/tests/RelWithDebInfo/data_frame_builder_tests.exe`：2 个测试用例、7 个断言全部通过。协议第 9.4 节精确字节、1020 样本最大合法 payload 和 1021 样本拒绝均取得自动化证据。
 - 2026-11-01 再次核对同一默认环境后，使用 `RelWithDebInfo` 成功构建 `device_simulator` 及全部五组测试；日志确认 `utc_sample_timeline.cpp` 与 `test_utc_sample_timeline.cpp` 实际参与编译。完整 CTest 5/5 通过、0 失败；直接运行 `utc_sample_timeline_tests.exe` 为 4 个用例、23 个断言全部通过，覆盖绝对起点、整除/零样本、非整除连续余数和重置异常安全。
+- 2026-11-01 序号接口封装完成后再次核对默认 VS2022、x64、MSVC 19.38环境，使用 `RelWithDebInfo` 成功构建模拟器与五组测试；日志确认 `WinsockRuntime.cpp` 实际重新编译。CTest 5/5 通过、0 失败，证明访问控制和接口声明可编译且既有回归未被破坏；由于新接口尚未调用，该结果不作为序号提交行为的动态证据。
 
 ## 已实现但未验证
 
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
 - 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建、协议回归和真实 TCP 控制路径联调；当前 tick 只推进截止时间，不生成或发送 DATA。
-- 连接局部 `SamplingContext` 已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。由于当前尚不发送 DATA，采样率值、通道掩码内容和序号清零仍没有线上可观察数据，后续 DATA 首帧测试需继续覆盖这些内部结果。
+- 连接局部 `SamplingContext` 的既有 START/STOP 生命周期已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。工作区进一步将序号数组私有化，新增 `current_sequence()` 只读接口和 `commit_sequence()` 成功提交接口，并已通过默认环境构建与完整回归；接口尚未被运行时调用，成功递增和失败不递增仍需后续 DATA 路径测试观察。
 - 接受后的客户端 Socket 已切换为非阻塞模式，只在 `OutboundQueue` 非空时监听 `writefds`；每次可写只调用一次 `send()`，用真实返回值推进部分发送偏移，并把 `WSAEWOULDBLOCK` 视为可重试状态。ACK+STATUS 全部排空后才提交会话状态和采样上下文；版本不匹配的 ERROR 排空后再关闭。该实现已通过静态复审、`git diff --check`、默认环境构建、全部自动化回归和完整真实 TCP 控制路径联调；部分发送与 `WSAEWOULDBLOCK` 分支仍只具备静态/纯队列证据，尚未被真实网络强制触发。
 
 ## 待处理/已知问题
@@ -111,7 +112,7 @@
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-11-01 验收结束时本地 `main`、`origin/main` 与 `HEAD a62bd5d` 一致；该提交包含时间线阻断项修正、`test_utc_sample_timeline.cpp` 及 CTest 登记。当前仅进度文档与本轮自测题存在未提交更新，未接入 `WinsockRuntime`。
+- 2026-11-01 本轮开始时本地 `main`、`origin/main` 与 `HEAD 7d74de3` 一致；当前未提交修改包括 `SamplingContext` 序号接口封装、进度文档与自测题。接口尚未接入 DATA 生成路径。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -180,12 +181,15 @@
 53. 2026-11-01 静态审查提交 `07a9968`：组件边界保持纯净，但 `advance()` 用赋值覆盖绝对 UTC 起点，`reset()` 校验旧成员而不是新参数；同时没有 `test_utc_sample_timeline.cpp` 或 CTest 登记，未覆盖整除、不能整除、连续分段和无效重置。本轮审查不通过，未运行构建或测试，也未修改用户核心实现。
 54. 2026-11-01 复审用户修正：`advance()` 已改为在现有 UTC 起点上累加整数商，`reset()` 已改为先校验新参数。按用户授权新增独立 Catch2 测试和 CTest 目标，静态覆盖显式起点、整除/零样本、非整除连续余数、零速率构造以及重置异常安全；`git diff --check` 通过。本轮未运行构建或测试。
 55. 2026-11-01 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 成功构建模拟器和五组测试。CTest 5/5 通过，时间线测试直接运行得到 4 个用例、23 个断言全部通过。纯 UTC 时间线小步完成，运行时仍不生成 DATA。
+56. 2026-11-01 用户指出 `WinsockRuntime` 已有 `SamplingContext::sequence_by_channel`。重新核对源码确认该数组已表示各通道下一 DATA 序号，`start()` 与 `reset()` 均清零；因此后续必须复用该状态，不新增平行序号组件，只在实际 DATA 入队边界补充读取与成功提交操作。
+57. 2026-11-01 静态复审用户对 `SamplingContext` 的封装：结构改为 `class final`，序号数组置于 private；`current_sequence()` 只读返回当前值，`commit_sequence()` 是唯一递增位置，`start()` / `reset()` 仍统一清零，运行时尚未调用新接口。未发现静态阻断项，`git diff --check` 通过；本轮未运行构建或测试。
+58. 2026-11-01 经用户许可核对默认缓存后，使用 VS2022、x64、MSVC 19.38和 `RelWithDebInfo` 构建模拟器与五组测试成功，`WinsockRuntime.cpp` 实际重新编译；CTest 5/5 通过、0 失败。该证据只验收编译和既有回归，序号接口尚未执行，不能宣称成功/失败提交行为已动态验证。
 
 ## 下一步流程
 
-1. 先明确每个启用通道独立维护 `uint32_t` 序号，新 START 从 0 开始，读取当前值本身不修改状态。
-2. 冻结提交边界：只有对应完整 DATA 帧成功进入发送队列后才递增；组帧、编码或入队失败均保持原序号，回绕按无符号规则自然发生。
-3. 选择最小纯组件或可测试接口并由用户实现；静态复审通过前不接入 `WinsockRuntime`。
+1. 冻结最小入队边界的显式输入：`SamplingContext`、`OutboundQueue`、`channel_id`、`timestamp_us` 和样本；内部不得读取时钟、推进 tick 或遍历多通道。
+2. 按顺序读取当前序号、调用纯组帧器、编码完整帧并尝试 `enqueue_data()`；只有返回成功才调用 `commit_sequence()`，任一步失败保持原序号。
+3. 本小步先建立可审查边界，不处理队列溢出后的关闭策略，也不从事件循环调用；静态复审通过后再决定最小测试方式。
 
 ## 暂不开始
 

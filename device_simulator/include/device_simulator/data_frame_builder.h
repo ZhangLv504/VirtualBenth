@@ -1,8 +1,9 @@
 #ifndef VIRTUALBENTH_DATA_FRAME_BUILDER_H
 #define VIRTUALBENTH_DATA_FRAME_BUILDER_H
 
-#include "device_simulator/data_frame_limits.h"
+#include "sampling_context.h"
 #include "protocol/frame.h"
+#include "outbound_queue.h"
 
 #include <cstdint>
 #include <vector>
@@ -17,5 +18,18 @@
     std::uint32_t sequence,
     std::uint64_t timestamp_us,
     const std::vector<float>& samples);
+
+// 为一个通道把一批样本组成单帧 DATA 并完整入队。
+//
+// 只有 enqueue_data() 返回 true 才提交该通道序号；返回 false 时队列、
+// 序号和入参都不变。sample_count 超过协议单帧上限时 make_data_frame()
+// 抛异常，此时序号同样未提交。
+[[nodiscard]] bool enqueue_channel_data(
+    SamplingContext& sampling_context,
+    OutboundQueue& outbound_queue,
+    std::uint8_t channel_id,
+    std::uint64_t timestamp_us,
+    const std::vector<float>& samples
+);
 
 #endif // VIRTUALBENTH_DATA_FRAME_BUILDER_H

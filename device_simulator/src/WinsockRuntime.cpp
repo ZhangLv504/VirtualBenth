@@ -8,6 +8,7 @@
 #include "protocol/protocol_codec.h"
 #include "protocol/stream_parser.h"
 #include "device_simulator/outbound_queue.h"
+#include "device_simulator/sampling_context.h"
 
 #include <algorithm>
 #include <array>
@@ -35,33 +36,6 @@ namespace
         Ready,      // HELLO 响应已发完，可以接受第一次 START
         Running,    // START 响应已发完，采集配置有效，可以接受 STOP
         Idle,       // STOP 响应已发完，采集已停止，可以再次 START
-    };
-
-    // 当前 TCP 连接内一次采集会话的可变上下文。
-    //
-    // START 的 ACK+STATUS 全部发送后整体初始化，STOP 的响应全部发送后清空；
-    // 连接结束时随 TcpServer::run() 的局部作用域销毁，不会泄漏到下一条连接。
-    struct SamplingContext
-    {
-        std::uint32_t sample_rate{0}; // START 指定的每通道每秒样本数；0 表示未配置
-        std::uint8_t channel_mask{0}; // bit0～bit7 分别表示通道 0～7 是否启用
-        std::array<std::uint32_t, 8> sequence_by_channel{}; // 各通道下一 DATA 序号
-
-        // 原子地应用新 START 配置，并把所有通道序号恢复到新会话起点 0。
-        void start(std::uint32_t new_sample_rate, std::uint8_t new_channel_mask) noexcept
-        {
-            sample_rate = new_sample_rate;
-            channel_mask = new_channel_mask;
-            sequence_by_channel.fill(0);
-        }
-
-        // 清除停止会话后的全部配置和序号，使旧采集数据不能污染下次 START。
-        void reset() noexcept
-        {
-            sample_rate = 0;
-            channel_mask = 0;
-            sequence_by_channel.fill(0);
-        }
     };
 
     // “ACK 成功”“READY 状态”“错误类型”，而不是散落难以审查的裸十六进制数。
