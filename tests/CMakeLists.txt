@@ -53,3 +53,14 @@ target_link_libraries(data_frame_builder_tests PRIVATE
 )
 
 add_test(NAME data_frame_builder_tests COMMAND data_frame_builder_tests)
+
+add_executable(utc_sample_timeline_tests
+    test_utc_sample_timeline.cpp
+)
+
+target_link_libraries(utc_sample_timeline_tests PRIVATE
+    simulator_core
+    catch2_amalgamated
+)
+
+add_test(NAME utc_sample_timeline_tests COMMAND utc_sample_timeline_tests)

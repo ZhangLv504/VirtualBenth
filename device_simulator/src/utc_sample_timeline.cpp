@@ -22,12 +22,12 @@ UtcSampleTimeline::UtcSampleTimeline(std::uint32_t sample_rate, std::uint64_t st
     : sample_rate_(sample_rate)
     , ts_us_(start_ts_us)
 {
-    validate_sample_rate(sample_rate_);
+    validate_sample_rate(sample_rate);
 }
 
 void UtcSampleTimeline::reset(std::uint32_t sample_rate, std::uint64_t start_ts_us)
 {
-    validate_sample_rate(sample_rate_);
+    validate_sample_rate(sample_rate);
     sample_rate_ = sample_rate;
     ts_us_ = start_ts_us;
     // 新会话从零余数开始；沿用上一轮余数会让首个分段的时间轴提前偏移。
@@ -37,7 +37,7 @@ void UtcSampleTimeline::reset(std::uint32_t sample_rate, std::uint64_t start_ts_
 void UtcSampleTimeline::advance(std::uint16_t sample_count)
 {
     const std::uint64_t numerator = remainder_ + static_cast<std::uint64_t>(sample_count) * kMicrosecondsPerSecond;
-    ts_us_ = numerator / sample_rate_;
+    ts_us_ += numerator / sample_rate_;
     remainder_ = numerator % sample_rate_;
 }
 
