@@ -2,6 +2,9 @@
 
 #include "device_simulator/data_frame_builder.h"
 #include "device_simulator/data_frame_limits.h"
+#include "device_simulator/outbound_queue.h"
+#include "device_simulator/sampling_context.h"
+#include "device_simulator/utc_sample_timeline.h"
 #include "protocol/protocol_codec.h"
 
 #include <algorithm>
@@ -109,4 +112,116 @@ TEST_CASE("channel DATA enqueue preserves sequence when frame construction throw
     REQUIRE(context.current_sequence(0) == 0);
     REQUIRE(queue.queued_bytes() == 0);
     REQUIRE(queue.queued_frames() == 0);
+}
+
+TEST_CASE("DATA segment enqueues enabled channels in ascending order with one timestamp",
+          "[simulator][data-frame][segment][sequence][timeline]")
+{
+    constexpr std::uint64_t kTimestampUs = 1712345678000ULL;
+    const std::vector<float> samples{1.5F, -0.2F, 0.8F};
+    SamplingContext context;
+    context.start(1000, 0x05); // 通道 0 和 2
+    OutboundQueue queue(1024);
+    UtcSampleTimeline timeline(1000, kTimestampUs);
+
+    const EncodeResult expected_channel_0 = ProtocolCodec::encode(
+        make_data_frame(0, 0, kTimestampUs, samples));
+    const EncodeResult expected_channel_2 = ProtocolCodec::encode(
+        make_data_frame(2, 0, kTimestampUs, samples));
+    REQUIRE(expected_channel_0.ok());
+    REQUIRE(expected_channel_2.ok());
+
+    REQUIRE(enqueue_segment_channels(context, queue, timeline, samples));
+    REQUIRE(context.current_sequence(0) == 1);
+    REQUIRE(context.current_sequence(1) == 0);
+    REQUIRE(context.current_sequence(2) == 1);
+    REQUIRE(queue.queued_frames() == 2);
+    REQUIRE(timeline.current_ts_us() == kTimestampUs + 3000);
+    REQUIRE(timeline.remainder() == 0);
+
+    const auto first = queue.front();
+    REQUIRE(first.has_value());
+    REQUIRE(first->kind == OutboundFrameKind::Data);
+    REQUIRE(first->size == expected_channel_0.bytes.size());
+    REQUIRE(std::equal(
+        expected_channel_0.bytes.begin(), expected_channel_0.bytes.end(), first->data));
+    queue.consume(first->size);
+
+    const auto second = queue.front();
+    REQUIRE(second.has_value());
+    REQUIRE(second->kind == OutboundFrameKind::Data);
+    REQUIRE(second->size == expected_channel_2.bytes.size());
+    REQUIRE(std::equal(
+        expected_channel_2.bytes.begin(), expected_channel_2.bytes.end(), second->data));
+}
+
+TEST_CASE("DATA segment leaves the timeline unchanged when a later channel lacks capacity",
+          "[simulator][data-frame][segment][backpressure][timeline]")
+{
+    constexpr std::uint64_t kTimestampUs = 1000000ULL;
+    const std::vector<float> samples{1.0F};
+    const EncodeResult expected_first = ProtocolCodec::encode(
+        make_data_frame(0, 0, kTimestampUs, samples));
+    REQUIRE(expected_first.ok());
+
+    SamplingContext context;
+    context.start(1000, 0x05); // 通道 0 成功后，通道 2 因容量不足失败
+    OutboundQueue queue(expected_first.bytes.size());
+    UtcSampleTimeline timeline(1000, kTimestampUs);
+
+    REQUIRE_FALSE(enqueue_segment_channels(context, queue, timeline, samples));
+    REQUIRE(context.current_sequence(0) == 1);
+    REQUIRE(context.current_sequence(2) == 0);
+    REQUIRE(queue.queued_frames() == 1);
+    REQUIRE(queue.queued_bytes() == expected_first.bytes.size());
+    REQUIRE(timeline.current_ts_us() == kTimestampUs);
+    REQUIRE(timeline.remainder() == 0);
+
+    const auto queued = queue.front();
+    REQUIRE(queued.has_value());
+    REQUIRE(queued->size == expected_first.bytes.size());
+    REQUIRE(std::equal(
+        expected_first.bytes.begin(), expected_first.bytes.end(), queued->data));
+}
+
+TEST_CASE("DATA segment rejects an empty channel mask without side effects",
+          "[simulator][data-frame][segment][validation]")
+{
+    constexpr std::uint64_t kTimestampUs = 1000000ULL;
+    SamplingContext context;
+    context.start(1000, 0x00);
+    OutboundQueue queue(1024);
+    UtcSampleTimeline timeline(1000, kTimestampUs);
+
+    REQUIRE_FALSE(enqueue_segment_channels(
+        context, queue, timeline, std::vector<float>{1.0F}));
+    REQUIRE(context.current_sequence(0) == 0);
+    REQUIRE(context.current_sequence(7) == 0);
+    REQUIRE(queue.queued_bytes() == 0);
+    REQUIRE(queue.queued_frames() == 0);
+    REQUIRE(timeline.current_ts_us() == kTimestampUs);
+    REQUIRE(timeline.remainder() == 0);
+}
+
+TEST_CASE("DATA segment validates its sample limit before the empty-mask branch",
+          "[simulator][data-frame][segment][validation]")
+{
+    constexpr std::uint64_t kTimestampUs = 1000000ULL;
+    SamplingContext context;
+    context.start(1000, 0x00);
+    OutboundQueue queue(64 * 1024);
+    UtcSampleTimeline timeline(1000, kTimestampUs);
+    const std::vector<float> too_many_samples(
+        static_cast<std::size_t>(kMaxSamplesPerDataFrame) + 1,
+        1.0F);
+
+    REQUIRE_THROWS_AS(
+        enqueue_segment_channels(context, queue, timeline, too_many_samples),
+        std::invalid_argument);
+    REQUIRE(context.current_sequence(0) == 0);
+    REQUIRE(context.current_sequence(7) == 0);
+    REQUIRE(queue.queued_bytes() == 0);
+    REQUIRE(queue.queued_frames() == 0);
+    REQUIRE(timeline.current_ts_us() == kTimestampUs);
+    REQUIRE(timeline.remainder() == 0);
 }

@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务以及非阻塞控制响应路径均已通过各自既定验收。工作区已提交纯 `enqueue_segment_channels()`，但零通道掩码行为与公开注释不一致，且尚无该协调函数的自动化测试；运行时仍不生成 DATA。
-- 当前唯一目标：修正 `enqueue_segment_channels()` 的零通道掩码契约，并补齐多通道成功、后续通道容量失败和超限输入测试；通过静态复审前不接入事件循环。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务以及非阻塞控制响应路径均已通过各自既定验收。纯 `enqueue_segment_channels()` 已修正零通道掩码契约，并补齐多通道成功、后续通道容量失败、零掩码和超限输入测试，静态复审未发现剩余阻断项；尚未构建或运行，运行时仍不生成 DATA。
+- 当前唯一目标：经用户许可后，在默认 VS2022 + `RelWithDebInfo` 环境构建模拟器和五组测试，运行完整 CTest 及 `data_frame_builder_tests`，取得多通道分段协调行为的实际证据。
 
 ## 默认构建环境
 
@@ -97,7 +97,7 @@
 - NetAssist 联调目前是人工验收记录，尚未固化为仓库内可重复运行的自动化端到端测试。
 - 工作区已恢复不可移动的单一 `SocketHandle`、单连接 `StreamParser` 和局部 `SessionState`；事件循环每轮重建 `readfds`，非 Running 状态永久等待控制字节，Running 状态按临时 20ms 单调时钟截止点设置 `select()` timeout。该实现已通过默认环境构建、协议回归和真实 TCP 控制路径联调；当前 tick 只推进截止时间，不生成或发送 DATA。
 - 连接局部 `SamplingContext` 的既有 START/STOP 生命周期已通过静态复审、默认环境构建、协议回归和同一连接 START→STOP→START 控制路径联调。工作区进一步将序号数组私有化，新增 `current_sequence()` 只读接口和 `commit_sequence()` 成功提交接口，并已通过默认环境构建与完整回归；接口尚未被运行时调用，成功递增和失败不递增仍需后续 DATA 路径测试观察。
-- `enqueue_segment_channels()` 已按通道0～7升序遍历启用位，复用同一 UTC 批起点和样本，任一单通道入队失败立即返回，全部成功后才推进一次时间线；该函数尚未接入事件循环或测试。当前 `channel_mask == 0` 时循环虽为空，但实现仍按 `samples.size()` 推进时间线，与头文件“推进0个样本、时间线不变”的契约不一致。
+- `enqueue_segment_channels()` 已按通道0～7升序遍历启用位，复用同一 UTC 批起点和样本，任一单通道入队失败立即返回，全部成功后才推进一次时间线；零通道掩码返回 false 且无副作用。该函数尚未接入事件循环；四类直接测试已完成静态复审但尚未构建或运行。
 - 接受后的客户端 Socket 已切换为非阻塞模式，只在 `OutboundQueue` 非空时监听 `writefds`；每次可写只调用一次 `send()`，用真实返回值推进部分发送偏移，并把 `WSAEWOULDBLOCK` 视为可重试状态。ACK+STATUS 全部排空后才提交会话状态和采样上下文；版本不匹配的 ERROR 排空后再关闭。该实现已通过静态复审、`git diff --check`、默认环境构建、全部自动化回归和完整真实 TCP 控制路径联调；部分发送与 `WSAEWOULDBLOCK` 分支仍只具备静态/纯队列证据，尚未被真实网络强制触发。
 
 ## 待处理/已知问题
@@ -111,12 +111,12 @@
 - 2026-11-01 首版工作区 DATA 网络集成曾存在 `chanId`、`ts`、float 字节序、分段时间线、队列溢出和 STOP 优先级阻断项；当前工作区已整体撤回该运行时路径，纯组帧组件已完成构建测试。上述网络集成问题保留为后续接入时的验收清单。
 - `UtcSampleTimeline::advance()` 覆盖绝对起点和 `reset()` 校验旧采样率的历史阻断项已修正，并已取得默认环境构建、CTest 和直接测试证据；时间线组件本身不再是待处理项。
 - `enqueue_channel_data()` 的直接头依赖、0～7通道契约以及成功、容量拒绝、组帧异常三类事务测试均已通过默认环境构建和运行验收；它尚未被 tick 或事件循环调用，不能据此宣称运行时已经推送 DATA。
-- `enqueue_segment_channels()` 的零掩码分支当前会在没有任何帧入队时推进非零样本数，与公开契约冲突；同时现有测试没有调用该函数，尚不能证明通道升序、共享时间戳、时间线只推进一次或中途失败不推进。
+- `enqueue_segment_channels()` 的多通道成功、后续通道容量失败、零掩码和超限输入测试已写入工作区；当前只具备静态证据，尚不能宣称这些行为已在默认环境执行通过。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-11-01 静态审查时本地 `main`、`origin/main` 与 `HEAD 899175a` 一致且工作区干净；`a8f914c` / `899175a` 新增纯 `enqueue_segment_channels()`，尚未接入 DATA 事件循环，也未新增自动化测试。审查后进度文档与自测题存在未提交更新。
+- 2026-11-01 测试补充时本地 `main`、`origin/main` 与 `HEAD f35ba55` 一致；该提交把零通道掩码冻结为返回 false 且不推进时间线。当前未提交修改包括多通道分段测试、进度文档和自测题；运行时尚未接入 DATA 事件循环。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -194,12 +194,13 @@
 62. 2026-11-01 用户补充 `<utility>` 后完成最终静态复审：单通道 DATA 入队边界的公开契约、直接头依赖、成功后序号提交、容量拒绝和组帧异常测试均未发现剩余阻断项，`git diff --check` 通过。本轮未运行构建或测试。
 63. 2026-11-01 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 构建模拟器及五组测试成功；`data_frame_builder.cpp` 和最新事务测试实际重新编译，相关目标 0 警告、0 错误。CTest 5/5 通过，直接运行 DATA 测试为5个用例、25个断言全部通过。单通道 DATA 入队事务完成运行验收，运行时仍未接入 tick。
 64. 2026-11-01 静态审查提交 `a8f914c` / `899175a`：多通道分段函数已保持纯组件边界，按通道升序复用同一时间戳，失败立即返回且全部成功后才推进时间线；但零通道掩码仍会按非空 samples 推进时间线，与头文件承诺不符，且没有任何测试调用新函数。审查暂不通过，本轮未运行构建或测试。
+65. 2026-11-01 复审提交 `f35ba55`：零通道掩码现返回 false，不入队也不推进时间线，头文件同步声明由上层按统一失败语义处理。按用户授权新增四类纯测试，静态覆盖通道0/2升序及共享时间戳、全部成功后时间线只推进一次、首通道成功而后续通道容量失败时的部分提交、零掩码无副作用，以及超限校验先于零掩码分支；直接头依赖已补齐，`git diff --check` 无错误。本轮未运行构建或测试。
 
 ## 下一步流程
 
-1. 让零通道掩码分支与公开契约一致：不入队、不推进时间线并返回 true；超限校验仍须先于该分支。
-2. 为 `enqueue_segment_channels()` 增加多通道成功、第二通道容量失败、零掩码和超限输入的纯自动化测试。
-3. 静态复审通过后再征得用户许可，使用默认 `RelWithDebInfo` 环境构建和运行；通过前不接入 Winsock 事件循环。
+1. 获得用户许可后重新核对默认缓存，使用 `RelWithDebInfo` 构建模拟器及全部五组测试。
+2. 运行完整 CTest，并直接运行 `data_frame_builder_tests` 获取新增用例和断言数。
+3. 全部通过后再设计一次 tick 对 `SampleBudget`、多分段协调函数和确定性样本的最小组合；通过前不接入 Winsock 事件循环。
 
 ## 暂不开始
 
