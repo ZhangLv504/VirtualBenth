@@ -126,3 +126,30 @@ bool enqueue_segment_channels(SamplingContext& sampling_context, OutboundQueue& 
     }
     return false;
 }
+
+bool run_data_tick(SamplingContext& sampling_context, OutboundQueue& outbound_queue, UtcSampleTimeline& timeline,
+    SampleBudget& sample_budget)
+{
+    const TickSampleBudget tick_budget = sample_budget.next_tick();
+
+    if (tick_budget.segments.empty())
+    {
+        return true;
+    }
+
+    for (const auto& segment : tick_budget.segments)
+    {
+        std::vector<float> samples(segment);
+        for (std::uint16_t index = 0; index < segment; ++index)
+        {
+            samples[index] = static_cast<float>(index % 256u);
+        }
+
+        if (!enqueue_segment_channels(sampling_context, outbound_queue, timeline, samples))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
