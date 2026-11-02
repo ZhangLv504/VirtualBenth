@@ -3,6 +3,7 @@
 #include "device_simulator/data_frame_builder.h"
 #include "device_simulator/data_frame_limits.h"
 #include "device_simulator/outbound_queue.h"
+#include "device_simulator/sample_budget.h"
 #include "device_simulator/sampling_context.h"
 #include "device_simulator/utc_sample_timeline.h"
 #include "protocol/protocol_codec.h"
@@ -218,6 +219,171 @@ TEST_CASE("DATA segment validates its sample limit before the empty-mask branch"
     REQUIRE_THROWS_AS(
         enqueue_segment_channels(context, queue, timeline, too_many_samples),
         std::invalid_argument);
+    REQUIRE(context.current_sequence(0) == 0);
+    REQUIRE(context.current_sequence(7) == 0);
+    REQUIRE(queue.queued_bytes() == 0);
+    REQUIRE(queue.queued_frames() == 0);
+    REQUIRE(timeline.current_ts_us() == kTimestampUs);
+    REQUIRE(timeline.remainder() == 0);
+}
+
+TEST_CASE("DATA tick accepts a legal empty budget without changing DATA state",
+          "[simulator][data-frame][tick][low-rate]")
+{
+    constexpr std::uint64_t kTimestampUs = 1000000ULL;
+    SamplingContext context;
+    context.start(10, 0x01);
+    OutboundQueue queue(1024);
+    UtcSampleTimeline timeline(10, kTimestampUs);
+    SampleBudget budget(10);
+
+    REQUIRE(run_data_tick(context, queue, timeline, budget));
+    REQUIRE(budget.credit() == 10);
+    REQUIRE(context.current_sequence(0) == 0);
+    REQUIRE(queue.queued_bytes() == 0);
+    REQUIRE(queue.queued_frames() == 0);
+    REQUIRE(timeline.current_ts_us() == kTimestampUs);
+    REQUIRE(timeline.remainder() == 0);
+}
+
+TEST_CASE("DATA tick combines one budget segment with deterministic multi-channel samples",
+          "[simulator][data-frame][tick][sequence][timeline]")
+{
+    constexpr std::uint64_t kTimestampUs = 1000000ULL;
+    std::vector<float> expected_samples(20);
+    for (std::uint16_t index = 0; index < expected_samples.size(); ++index)
+    {
+        expected_samples[index] = static_cast<float>(index % 256u);
+    }
+
+    const EncodeResult expected_channel_0 = ProtocolCodec::encode(
+        make_data_frame(0, 0, kTimestampUs, expected_samples));
+    const EncodeResult expected_channel_2 = ProtocolCodec::encode(
+        make_data_frame(2, 0, kTimestampUs, expected_samples));
+    REQUIRE(expected_channel_0.ok());
+    REQUIRE(expected_channel_2.ok());
+
+    SamplingContext context;
+    context.start(1000, 0x05);
+    OutboundQueue queue(4096);
+    UtcSampleTimeline timeline(1000, kTimestampUs);
+    SampleBudget budget(1000);
+
+    REQUIRE(run_data_tick(context, queue, timeline, budget));
+    REQUIRE(context.current_sequence(0) == 1);
+    REQUIRE(context.current_sequence(2) == 1);
+    REQUIRE(queue.queued_frames() == 2);
+    REQUIRE(timeline.current_ts_us() == kTimestampUs + 20000);
+    REQUIRE(timeline.remainder() == 0);
+
+    const auto first = queue.front();
+    REQUIRE(first.has_value());
+    REQUIRE(first->size == expected_channel_0.bytes.size());
+    REQUIRE(std::equal(
+        expected_channel_0.bytes.begin(), expected_channel_0.bytes.end(), first->data));
+    queue.consume(first->size);
+
+    const auto second = queue.front();
+    REQUIRE(second.has_value());
+    REQUIRE(second->size == expected_channel_2.bytes.size());
+    REQUIRE(std::equal(
+        expected_channel_2.bytes.begin(), expected_channel_2.bytes.end(), second->data));
+}
+
+TEST_CASE("DATA tick processes every large-budget segment in order",
+          "[simulator][data-frame][tick][segmentation][timeline]")
+{
+    constexpr std::uint32_t kSampleRate = 125000;
+    constexpr std::uint64_t kTimestampUs = 1000000ULL;
+    SamplingContext context;
+    context.start(kSampleRate, 0x01);
+    OutboundQueue queue(64 * 1024);
+    UtcSampleTimeline timeline(kSampleRate, kTimestampUs);
+    SampleBudget budget(kSampleRate);
+
+    REQUIRE(run_data_tick(context, queue, timeline, budget));
+    REQUIRE(context.current_sequence(0) == 3);
+    REQUIRE(queue.queued_frames() == 3);
+    REQUIRE(timeline.current_ts_us() == kTimestampUs + 20000);
+    REQUIRE(timeline.remainder() == 0);
+
+    const std::vector<std::uint16_t> segment_sizes{1020, 1020, 460};
+    const std::vector<std::uint64_t> segment_timestamps{
+        kTimestampUs,
+        kTimestampUs + 8160,
+        kTimestampUs + 16320,
+    };
+
+    for (std::size_t segment_index = 0; segment_index < segment_sizes.size(); ++segment_index)
+    {
+        std::vector<float> expected_samples(segment_sizes[segment_index]);
+        for (std::uint16_t index = 0; index < segment_sizes[segment_index]; ++index)
+        {
+            expected_samples[index] = static_cast<float>(index % 256u);
+        }
+
+        const EncodeResult expected = ProtocolCodec::encode(make_data_frame(
+            0,
+            static_cast<std::uint32_t>(segment_index),
+            segment_timestamps[segment_index],
+            expected_samples));
+        REQUIRE(expected.ok());
+
+        const auto queued = queue.front();
+        REQUIRE(queued.has_value());
+        REQUIRE(queued->size == expected.bytes.size());
+        REQUIRE(std::equal(expected.bytes.begin(), expected.bytes.end(), queued->data));
+        queue.consume(queued->size);
+    }
+    REQUIRE(queue.empty());
+}
+
+TEST_CASE("DATA tick preserves committed earlier segments when a later segment lacks capacity",
+          "[simulator][data-frame][tick][backpressure][timeline]")
+{
+    constexpr std::uint32_t kSampleRate = 125000;
+    constexpr std::uint64_t kTimestampUs = 1000000ULL;
+    std::vector<float> first_samples(kMaxSamplesPerDataFrame);
+    for (std::uint16_t index = 0; index < kMaxSamplesPerDataFrame; ++index)
+    {
+        first_samples[index] = static_cast<float>(index % 256u);
+    }
+    const EncodeResult first_frame = ProtocolCodec::encode(
+        make_data_frame(0, 0, kTimestampUs, first_samples));
+    REQUIRE(first_frame.ok());
+
+    SamplingContext context;
+    context.start(kSampleRate, 0x01);
+    OutboundQueue queue(first_frame.bytes.size());
+    UtcSampleTimeline timeline(kSampleRate, kTimestampUs);
+    SampleBudget budget(kSampleRate);
+
+    REQUIRE_FALSE(run_data_tick(context, queue, timeline, budget));
+    REQUIRE(budget.credit() == 0);
+    REQUIRE(context.current_sequence(0) == 1);
+    REQUIRE(queue.queued_frames() == 1);
+    REQUIRE(queue.queued_bytes() == first_frame.bytes.size());
+    REQUIRE(timeline.current_ts_us() == kTimestampUs + 8160);
+    REQUIRE(timeline.remainder() == 0);
+
+    const auto queued = queue.front();
+    REQUIRE(queued.has_value());
+    REQUIRE(queued->size == first_frame.bytes.size());
+    REQUIRE(std::equal(first_frame.bytes.begin(), first_frame.bytes.end(), queued->data));
+}
+
+TEST_CASE("DATA tick rejects an empty channel mask after consuming a non-empty budget",
+          "[simulator][data-frame][tick][validation]")
+{
+    constexpr std::uint64_t kTimestampUs = 1000000ULL;
+    SamplingContext context;
+    context.start(1000, 0x00);
+    OutboundQueue queue(1024);
+    UtcSampleTimeline timeline(1000, kTimestampUs);
+    SampleBudget budget(1000);
+
+    REQUIRE_FALSE(run_data_tick(context, queue, timeline, budget));
+    REQUIRE(budget.credit() == 0);
     REQUIRE(context.current_sequence(0) == 0);
     REQUIRE(context.current_sequence(7) == 0);
     REQUIRE(queue.queued_bytes() == 0);

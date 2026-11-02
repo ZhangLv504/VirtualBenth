@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务、纯多通道分段协调以及非阻塞控制响应路径均已通过各自既定验收。运行时 tick 仍只推进截止时间，不生成 DATA。
-- 当前唯一目标：设计并冻结一个不依赖 Socket 的“单次逻辑 tick”纯调用边界，把 `SampleBudget::next_tick()`、确定性样本、各分段的 `enqueue_segment_channels()` 串联起来；暂不修改 Winsock 事件循环。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务、纯多通道分段协调、纯单次逻辑 tick 以及非阻塞控制响应路径均已通过各自既定验收。Winsock 事件循环仍只推进截止时间，不生成 DATA。
+- 当前唯一目标：设计并冻结连接局部 `SampleBudget` / `UtcSampleTimeline` 的创建、重置与销毁时机，以及事件循环调用 `run_data_tick()` 的唯一位置和失败处置；本轮不直接修改 Winsock 实现。
 
 ## 默认构建环境
 
@@ -92,6 +92,7 @@
 - 2026-11-01 序号接口封装完成后再次核对默认 VS2022、x64、MSVC 19.38环境，使用 `RelWithDebInfo` 成功构建模拟器与五组测试；日志确认 `WinsockRuntime.cpp` 实际重新编译。CTest 5/5 通过、0 失败，证明访问控制和接口声明可编译且既有回归未被破坏；由于新接口尚未调用，该结果不作为序号提交行为的动态证据。
 - 2026-11-01 单通道 DATA 入队事务收尾后重新核对默认缓存：Visual Studio 17 2022、x64、多配置、MSVC 19.38.33145.0（工具集 14.38.33130），并显式使用 `RelWithDebInfo`。构建模拟器及全部五组测试成功，日志确认 `data_frame_builder.cpp` 和最新 `test_data_frame_builder.cpp` 实际重新编译，相关目标 0 警告、0 错误；CTest 5/5 通过、0 失败，直接运行 `data_frame_builder_tests.exe` 为5个用例、25个断言全部通过。成功入队后序号只递增目标通道一次、容量拒绝和组帧异常时队列及序号不变均取得动态证据。
 - 2026-11-02 重新核对默认缓存为 Visual Studio 17 2022、x64、多配置、MSVC 19.38.33145.0（工具集 14.38.33130），并显式使用 `RelWithDebInfo`。构建模拟器及全部五组测试成功，日志确认 `data_frame_builder.cpp` 与含四个新增协调用例的 `test_data_frame_builder.cpp` 实际重新编译，相关目标 0 警告、0 错误；CTest 5/5 通过、0 失败，直接运行 `data_frame_builder_tests.exe` 为9个用例、67个断言全部通过。通道0/2升序及共享时间戳、整段成功后时间线只推进一次、后续通道容量失败的部分提交、零掩码无副作用和超限先校验均取得动态证据。
+- 2026-11-02 再次核对同一默认环境并使用 `RelWithDebInfo` 构建模拟器及全部五组测试成功；日志确认 `data_frame_builder.cpp` 与含五个新增 tick 用例的测试源码实际重新编译，相关目标 0 警告、0 错误。CTest 5/5 通过、0 失败，直接运行 `data_frame_builder_tests.exe` 为14个用例、125个断言全部通过；低采样率空 tick、单分段多通道确定性字节、2500样本三分段顺序及时间戳、后续分段容量失败的部分提交和非空预算下零掩码失败均取得动态证据。
 
 ## 已实现但未验证
 
@@ -112,11 +113,12 @@
 - `UtcSampleTimeline::advance()` 覆盖绝对起点和 `reset()` 校验旧采样率的历史阻断项已修正，并已取得默认环境构建、CTest 和直接测试证据；时间线组件本身不再是待处理项。
 - `enqueue_channel_data()` 的直接头依赖、0～7通道契约以及成功、容量拒绝、组帧异常三类事务测试均已通过默认环境构建和运行验收；它尚未被 tick 或事件循环调用，不能据此宣称运行时已经推送 DATA。
 - `enqueue_segment_channels()` 的多通道成功、后续通道容量失败、零掩码和超限输入均已通过默认环境构建与运行验收；该纯函数尚未被 tick 或事件循环调用，不能据此宣称运行时已经生成或发送 DATA。
+- `run_data_tick()` 已通过默认环境构建和五类直接测试，但尚未接入 Winsock 的20ms截止时间路径；连接会话中还没有 `SampleBudget` / `UtcSampleTimeline` 的运行时生命周期，因此不能宣称模拟器已经在线上推流。
 
 ## 当前工作区实现
 
 - encode 基线为 `a230d26`；decode 基线为 `e053eeb`；`StreamParser` 第一版实现为 `5178d96`，静态审查修正及文档更新为 `a7009fe`，第一批测试为 `6500c34`，最大帧临界测试为 `878fced`，S6 确定性非均匀分片测试最新提交为 `bd8ed48`。
-- 2026-11-02 运行验收时本地 `main`、`origin/main` 与 `HEAD bad22f5` 一致且工作区干净；该提交包含零掩码契约、四类多通道分段测试、进度文档和自测题，尚未接入 DATA 事件循环。
+- 2026-11-02 运行验收时本地 `main`、`origin/main` 与 `HEAD 23612b6` 一致；该提交新增纯 `run_data_tick()` 及完整职责说明，尚未接入 DATA 事件循环。当前未提交修改包括五类直接测试、进度文档和自测题。
 - `protocol/include/protocol/protocol_codec.h`：已包含 encode/decode 结果接口，并明确流式状态与业务语义不属于 decode。
 - `protocol/src/protocol_codec.cpp`：encode 校验可发送版本/命令；decode 校验精确帧结构与 CRC，并保留线上原始版本/命令。
 - `protocol/CMakeLists.txt`：已把 `src/protocol_codec.cpp` 和 `src/stream_parser.cpp` 加入 `protocol` 静态库。
@@ -196,12 +198,14 @@
 64. 2026-11-01 静态审查提交 `a8f914c` / `899175a`：多通道分段函数已保持纯组件边界，按通道升序复用同一时间戳，失败立即返回且全部成功后才推进时间线；但零通道掩码仍会按非空 samples 推进时间线，与头文件承诺不符，且没有任何测试调用新函数。审查暂不通过，本轮未运行构建或测试。
 65. 2026-11-01 复审提交 `f35ba55`：零通道掩码现返回 false，不入队也不推进时间线，头文件同步声明由上层按统一失败语义处理。按用户授权新增四类纯测试，静态覆盖通道0/2升序及共享时间戳、全部成功后时间线只推进一次、首通道成功而后续通道容量失败时的部分提交、零掩码无副作用，以及超限校验先于零掩码分支；直接头依赖已补齐，`git diff --check` 无错误。本轮未运行构建或测试。
 66. 2026-11-02 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 构建模拟器及五组测试成功；相关实现和最新测试实际重新编译，0 警告、0 错误。CTest 5/5 通过，直接运行 DATA 测试为9个用例、67个断言全部通过。纯多通道分段协调完成运行验收，运行时仍未接入 tick。
+67. 2026-11-02 静态审查提交 `23612b6`：`run_data_tick()` 每次只取一次预算，按 segments 顺序生成确定性样本并逐段入队；空 tick、失败不回滚和职责边界均与头文件说明一致，未发现核心实现阻断项。按用户此前测试授权新增五类直接测试，静态覆盖低采样率空 tick、单分段多通道确定性字节、2500样本三分段顺序及时间戳、后续分段容量失败的部分提交，以及非空预算下零掩码失败；直接头依赖已补齐，`git diff --check` 无错误。本轮未运行构建或测试。
+68. 2026-11-02 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 构建模拟器及五组测试成功；相关实现和最新测试实际重新编译，0 警告、0 错误。CTest 5/5 通过，直接运行 DATA 测试为14个用例、125个断言全部通过。纯单次逻辑 tick 完成运行验收，Winsock 事件循环仍未调用该边界。
 
 ## 下一步流程
 
-1. 冻结纯“单次逻辑 tick”函数的显式输入、返回值与状态提交边界，不读取时钟、不调用 Socket。
-2. 明确按 `SampleBudget::next_tick().segments` 顺序生成确定性样本，并逐段调用 `enqueue_segment_channels()`；任一分段失败立即返回，上层负责队列清理和关闭连接。
-3. 设计审查通过后再由用户实现核心代码并补充纯测试；通过前不接入 Winsock 事件循环。
+1. 冻结 `SampleBudget` 与 `UtcSampleTimeline` 的连接局部所有权：成功 START 的 ACK+RUNNING 全部排空并提交 Running 时创建或重置，STOP 提交或连接结束时失效。
+2. 冻结调用位置：每轮先处理已就绪控制输入，再在 Running 且截止时间到达时调用一次 `run_data_tick()`；错过的旧 tick 只推进预算和时间线，不做无界追赶。
+3. 冻结失败处置：停止生成新 DATA，丢弃尚未开始发送的 DATA，尽力排入 `ERROR(INTERNAL)`，排空后关闭连接；设计审查通过前不修改事件循环。
 
 ## 暂不开始
 
