@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务、纯多通道分段协调、纯单次逻辑 tick 以及非阻塞控制响应路径均已通过各自既定验收。Winsock 事件循环仍只推进截止时间，不生成 DATA。
-- 当前唯一目标：设计并冻结连接局部 `SampleBudget` / `UtcSampleTimeline` 的创建、重置与销毁时机，以及事件循环调用 `run_data_tick()` 的唯一位置和失败处置；本轮不直接修改 Winsock 实现。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务、纯多通道分段协调、纯单次逻辑 tick 以及非阻塞控制响应路径均已通过各自既定验收。Winsock 集成的生命周期、控制优先顺序和失败语义已完成静态设计冻结，但事件循环仍只推进截止时间，不生成 DATA。
+- 当前唯一目标：先补齐不依赖 Socket 的“批量丢弃过期 tick”纯计算边界，使旧 tick 的预算积分和 UTC 时间线能在有界步骤内共同推进；本轮不修改 Winsock 事件循环。
 
 ## 默认构建环境
 
@@ -200,12 +200,13 @@
 66. 2026-11-02 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 构建模拟器及五组测试成功；相关实现和最新测试实际重新编译，0 警告、0 错误。CTest 5/5 通过，直接运行 DATA 测试为9个用例、67个断言全部通过。纯多通道分段协调完成运行验收，运行时仍未接入 tick。
 67. 2026-11-02 静态审查提交 `23612b6`：`run_data_tick()` 每次只取一次预算，按 segments 顺序生成确定性样本并逐段入队；空 tick、失败不回滚和职责边界均与头文件说明一致，未发现核心实现阻断项。按用户此前测试授权新增五类直接测试，静态覆盖低采样率空 tick、单分段多通道确定性字节、2500样本三分段顺序及时间戳、后续分段容量失败的部分提交，以及非空预算下零掩码失败；直接头依赖已补齐，`git diff --check` 无错误。本轮未运行构建或测试。
 68. 2026-11-02 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 构建模拟器及五组测试成功；相关实现和最新测试实际重新编译，0 警告、0 错误。CTest 5/5 通过，直接运行 DATA 测试为14个用例、125个断言全部通过。纯单次逻辑 tick 完成运行验收，Winsock 事件循环仍未调用该边界。
+69. 2026-11-02 对照协议 5.1.1 静态复核当前 Winsock 骨架：若在 `now >= next_data_deadline` 的现有 `select()` 前分支直接生成 DATA，会绕过已就绪的 STOP；同时，当前仅在发送队列为空时处理 `pending_frames`，将使 STOP 等待已排队 DATA。现冻结集成规则：`SampleBudget` / `UtcSampleTimeline` 采用连接局部可选所有权，只在 START 的 ACK+RUNNING 全部排空并提交 Running 时共同创建；STOP 一经接受便禁止新 DATA、清除尚未开始发送的 DATA，待 ACK+IDLE 排空后再与 `SamplingContext` 一起失效；截止时间已到也必须先以零超时进入 `select()` 并处理可读控制输入，之后仅为最新到期 tick 调用一次 `run_data_tick()`；失败时清未开始 DATA、尽力排入 `ERROR(INTERNAL)` 并排空后关闭。复核还确认现有 `SampleBudget::next_tick()` 和 `UtcSampleTimeline::advance(uint16_t)` 不能有界地批量跳过任意数量旧 tick，因此先补纯计算批量推进边界，再改事件循环。本轮未修改运行时代码，未构建或测试。
 
 ## 下一步流程
 
-1. 冻结 `SampleBudget` 与 `UtcSampleTimeline` 的连接局部所有权：成功 START 的 ACK+RUNNING 全部排空并提交 Running 时创建或重置，STOP 提交或连接结束时失效。
-2. 冻结调用位置：每轮先处理已就绪控制输入，再在 Running 且截止时间到达时调用一次 `run_data_tick()`；错过的旧 tick 只推进预算和时间线，不做无界追赶。
-3. 冻结失败处置：停止生成新 DATA，丢弃尚未开始发送的 DATA，尽力排入 `ERROR(INTERNAL)`，排空后关闭连接；设计审查通过前不修改事件循环。
+1. 为 `SampleBudget` 增加按 tick 数批量推进的纯接口：不生成分段 vector，以有界计算更新积分余数并返回这些 tick 对应的总样本数；明确零 tick 与算术溢出语义。
+2. 让 `UtcSampleTimeline` 能按上述总样本数有界推进，并增加纯协调边界，保证只推进预算和时间线，不改序号、不入队 DATA。
+3. 为零 tick、低采样率余数、跨多个 tick、与逐 tick 结果等价及溢出/异常安全增加测试；纯边界验收后才接入 Winsock。
 
 ## 暂不开始
 
