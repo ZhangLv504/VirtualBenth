@@ -10,7 +10,13 @@ public:
 
     void reset(std::uint32_t sample_rate, std::uint64_t start_ts_us);
 
-    void advance(std::uint16_t sample_count);
+    // 按 sample_count 个样本推进批次起点：ts += (remainder + sample_count × 1e6) / rate，
+    // remainder = (remainder + sample_count × 1e6) % rate。
+    //
+    // 形参 widen 到 uint64 是为了支持一次推进批量丢弃的样本数（若干个 tick 的总和），
+    // 单个 DATA 分段仍只传 ≤1020。安全上界：sample_count < 2^64 / 1e6 ≈ 1.8×10^13；
+    // 超过它与 rate 为 0（构造与 reset 已排除）都是未处理的前置条件违反。
+    void advance(std::uint64_t sample_count);
 
     [[nodiscard]] std::uint64_t current_ts_us() const noexcept;
 

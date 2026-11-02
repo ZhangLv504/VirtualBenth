@@ -39,6 +39,8 @@ public:
     // sample_rate 为 0 时抛出 std::invalid_argument，且对象原状态保持不变。
     void reset(std::uint32_t sample_rate);
 
+    [[nodiscard]] std::uint64_t advance_ticks(std::uint64_t tick_count);
+
     // 返回当前配置的每秒样本数，不推进预算。
     [[nodiscard]] std::uint32_t sample_rate() const noexcept;
 

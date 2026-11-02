@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <stdexcept>
+#include <limits>
 
 namespace
 {
@@ -64,6 +65,30 @@ void SampleBudget::reset(std::uint32_t sample_rate)
     sample_rate_ = sample_rate;
     // 重置会话时，必须清零积分池，防止上一轮的进度污染新一轮的采样起始状态
     credit_ = 0;
+}
+
+std::uint64_t SampleBudget::advance_ticks(std::uint64_t tick_count)
+{
+    if (tick_count == 0)
+    {
+        return 0;
+    }
+
+    // 乘法先于加法进行校验：credit_ 恒小于 kDataTicksPerSecond，只要乘积可表示，
+    // 加上 credit_ 也必然可表示。抛出时 sample_rate_ 与 credit_ 均未被修改。
+    if (static_cast<std::uint64_t>(sample_rate_) >
+        std::numeric_limits<std::uint64_t>::max() / tick_count)
+    {
+        throw std::invalid_argument("advance_ticks product exceeds uint64 range");
+    }
+
+    // 与 next_tick() 同一个积分恒等式的批量形式：n 个 tick 累计 n×sample_rate 份
+    // 1/50 碎片，兑换 (credit + n×rate) / 50 个整样本，余数仍交给下一次调用。
+    const std::uint64_t accumulated = credit_ + static_cast<std::uint64_t>(sample_rate_) * tick_count;
+    const std::uint64_t total_samples = accumulated / kDataTicksPerSecond;
+    credit_ = accumulated % kDataTicksPerSecond;
+
+    return total_samples;
 }
 
 std::uint32_t SampleBudget::sample_rate() const noexcept

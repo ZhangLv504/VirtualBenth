@@ -34,9 +34,9 @@ void UtcSampleTimeline::reset(std::uint32_t sample_rate, std::uint64_t start_ts_
     remainder_ = 0;
 }
 
-void UtcSampleTimeline::advance(std::uint16_t sample_count)
+void UtcSampleTimeline::advance(std::uint64_t sample_count)
 {
-    const std::uint64_t numerator = remainder_ + static_cast<std::uint64_t>(sample_count) * kMicrosecondsPerSecond;
+    const std::uint64_t numerator = remainder_ + sample_count * kMicrosecondsPerSecond;
     ts_us_ += numerator / sample_rate_;
     remainder_ = numerator % sample_rate_;
 }
