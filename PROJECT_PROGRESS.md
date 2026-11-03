@@ -7,8 +7,8 @@
 
 - 主线：项目一 VirtualBenth，W2 模拟器起步。
 - 学习会话：S7 模拟器起步及 HELLO/START/STOP 最小控制状态机已通过构建、协议回归和 NetAssist 手工联调验收。
-- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务、纯多通道分段协调、纯单次逻辑 tick 以及非阻塞控制响应路径均已通过各自既定验收。Winsock 集成的生命周期、控制优先顺序和失败语义已完成静态设计冻结，但事件循环仍只推进截止时间，不生成 DATA。
-- 当前唯一目标：先补齐不依赖 Socket 的“批量丢弃过期 tick”纯计算边界，使旧 tick 的预算积分和 UTC 时间线能在有界步骤内共同推进；本轮不修改 Winsock 事件循环。
+- 当前状态：连接局部 `SamplingContext`、纯计算 `SampleBudget`、64KiB `OutboundQueue`、纯 `data_frame_builder`、纯 `UtcSampleTimeline`、单通道 DATA 入队事务、纯多通道分段协调、纯单次逻辑 tick 以及非阻塞控制响应路径均已通过各自既定验收。Winsock 集成的生命周期、控制优先顺序和失败语义已完成静态设计冻结；批量丢弃旧 tick 的第一版实现已提交，但溢出与异常安全静态审查尚未通过。事件循环仍只推进截止时间，不生成 DATA。
+- 当前唯一目标：修正 `SampleBudget::advance_ticks()` 与 `UtcSampleTimeline::advance()` 的全部 `uint64_t` 溢出边界，统一抛出 `std::overflow_error`，并保证异常发生时原状态不变；本轮不修改 Winsock 事件循环。
 
 ## 默认构建环境
 
@@ -201,12 +201,13 @@
 67. 2026-11-02 静态审查提交 `23612b6`：`run_data_tick()` 每次只取一次预算，按 segments 顺序生成确定性样本并逐段入队；空 tick、失败不回滚和职责边界均与头文件说明一致，未发现核心实现阻断项。按用户此前测试授权新增五类直接测试，静态覆盖低采样率空 tick、单分段多通道确定性字节、2500样本三分段顺序及时间戳、后续分段容量失败的部分提交，以及非空预算下零掩码失败；直接头依赖已补齐，`git diff --check` 无错误。本轮未运行构建或测试。
 68. 2026-11-02 经用户许可核对默认 VS2022、x64、MSVC 19.38/工具集14.38环境，使用 `RelWithDebInfo` 构建模拟器及五组测试成功；相关实现和最新测试实际重新编译，0 警告、0 错误。CTest 5/5 通过，直接运行 DATA 测试为14个用例、125个断言全部通过。纯单次逻辑 tick 完成运行验收，Winsock 事件循环仍未调用该边界。
 69. 2026-11-02 对照协议 5.1.1 静态复核当前 Winsock 骨架：若在 `now >= next_data_deadline` 的现有 `select()` 前分支直接生成 DATA，会绕过已就绪的 STOP；同时，当前仅在发送队列为空时处理 `pending_frames`，将使 STOP 等待已排队 DATA。现冻结集成规则：`SampleBudget` / `UtcSampleTimeline` 采用连接局部可选所有权，只在 START 的 ACK+RUNNING 全部排空并提交 Running 时共同创建；STOP 一经接受便禁止新 DATA、清除尚未开始发送的 DATA，待 ACK+IDLE 排空后再与 `SamplingContext` 一起失效；截止时间已到也必须先以零超时进入 `select()` 并处理可读控制输入，之后仅为最新到期 tick 调用一次 `run_data_tick()`；失败时清未开始 DATA、尽力排入 `ERROR(INTERNAL)` 并排空后关闭。复核还确认现有 `SampleBudget::next_tick()` 和 `UtcSampleTimeline::advance(uint16_t)` 不能有界地批量跳过任意数量旧 tick，因此先补纯计算批量推进边界，再改事件循环。本轮未修改运行时代码，未构建或测试。
+70. 2026-11-02 静态审查提交 `1e479ab` / `e3164f4`：`SampleBudget::advance_ticks()` 已采用 O(1) 批量积分且零 tick 无副作用，`UtcSampleTimeline::advance()` 也已扩大到 `uint64_t`，方向正确；但预算器只校验 `sample_rate × tick_count`，没有校验再加旧 `credit_`，例如旧 credit 为 1、采样率为 1、tick 数为 `UINT64_MAX` 时会静默回绕。时间线则把超大样本数列为“未处理前置条件”，实现中的 `sample_count × 1000000 + remainder_` 和 `ts_us_ + delta` 都可能静默回绕，不符合已冻结的“溢出抛异常且原状态不变”。此外预算器使用 `invalid_argument` 报算术溢出，公开接口也尚未说明零 tick、返回值、溢出类型和强异常保证。当前静态审查不通过；未运行构建或测试，未修改用户核心实现，未发现需要代补的直接头文件。
 
 ## 下一步流程
 
-1. 为 `SampleBudget` 增加按 tick 数批量推进的纯接口：不生成分段 vector，以有界计算更新积分余数并返回这些 tick 对应的总样本数；明确零 tick 与算术溢出语义。
-2. 让 `UtcSampleTimeline` 能按上述总样本数有界推进，并增加纯协调边界，保证只推进预算和时间线，不改序号、不入队 DATA。
-3. 为零 tick、低采样率余数、跨多个 tick、与逐 tick 结果等价及溢出/异常安全增加测试；纯边界验收后才接入 Winsock。
+1. 预算器在任何计算前按“最大值减旧 credit”校验完整累加式，溢出抛 `std::overflow_error`；公开头文件补齐零 tick、返回值和强异常保证。
+2. 时间线分别校验“样本数乘微秒并加旧余数”和“旧时间戳加本次增量”，全部成功后再一次性提交新时间戳与新余数；头文件删除“未处理前置条件”并声明溢出语义。
+3. 修正通过静态复审后，再增加纯协调边界和零 tick、逐 tick 等价、两类时间线溢出及异常安全测试；纯边界验收后才接入 Winsock。
 
 ## 暂不开始
 
